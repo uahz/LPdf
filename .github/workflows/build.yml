@@ -12,6 +12,13 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+# softprops/action-gh-release 需要写 issues 才能自动生成发布说明；
+# 默认令牌是只读的，缺这条会在「Release 已存在」时失败。
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
 jobs:
   # ---------------------------------------------------------------
   # 单元测试：每次 push / PR 都跑，快
@@ -123,7 +130,11 @@ jobs:
           files: |
             app/build/outputs/apk/debug/*.apk
             app/build/outputs/apk/release/*.apk
-          generate_release_notes: true
+          # 发布说明由发版流程手写；这里若开 generate_release_notes，
+          # 在 Release 已存在时会调用一个需要更高权限的接口并报 403。
+          generate_release_notes: false
+          # 允许覆盖同名资产，便于修复后重跑同一 tag
+          overwrite_files: true
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
