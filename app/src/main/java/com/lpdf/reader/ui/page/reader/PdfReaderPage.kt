@@ -125,6 +125,13 @@ fun PdfReaderPage(
         vm.setZoomLimit(settings.zoomLimit.toFloat())
     }
 
+    // 标注扁平化导出：用 SAF 让用户选保存位置，避免申请额外存储权限
+    val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/pdf")
+    ) { targetUri ->
+        if (targetUri != null) vm.exportFlattened(targetUri)
+    }
+
     // 阅读时常亮
     val activity = LocalContext.current as? android.app.Activity
     LaunchedEffect(settings.keepScreenOn) {
@@ -300,6 +307,7 @@ fun PdfReaderPage(
                 ToolIsland(
                     tool = state.tool,
                     color = state.highlightColor,
+                    annotationCount = state.annotationCount,
                     onColor = vm::setHighlightColor,
                     onUndo = {
                         if (!vm.undo(state.currentPage)) vm.toast("没有可撤销的标注")
@@ -308,6 +316,7 @@ fun PdfReaderPage(
                         vm.clearPage(state.currentPage)
                         vm.toast("已清空本页标注")
                     },
+                    onExport = { exportLauncher.launch(suggestExportName(state.displayName)) },
                     onClose = { vm.setTool(EditorTool.NONE) }
                 )
             }
@@ -359,6 +368,15 @@ fun PdfReaderPage(
                     .align(Alignment.TopCenter)
                     .padding(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 72.dp)
             )
+
+            // 标注导出进度（逐页渲染 + 叠加，页数多时耗时明显）
+            val exporting by vm.exportProgress.collectAsState()
+            exporting?.let { p ->
+                com.lpdf.reader.ui.glass.GlassLoadingOverlay(
+                    text = "正在导出标注…",
+                    progress = p
+                )
+            }
             }
         }
     )
@@ -367,6 +385,17 @@ fun PdfReaderPage(
 // ---------------------------------------------------------------------------
 // 单页渲染
 // ---------------------------------------------------------------------------
+
+/**
+ * 生成导出文件的默认名：`原名-已标注.pdf`。
+ * SAF 的 CreateDocument 只接受文件名，不接受路径。
+ */
+private fun suggestExportName(displayName: String): String {
+    val base = displayName.substringBeforeLast('.', displayName).ifBlank { "文档" }
+    // 去掉文件名里对 SAF 不友好的字符
+    val safe = base.replace(Regex("""[\\/:*?"<>|]"""), "_").take(60)
+    return "$safe-已标注.pdf"
+}
 
 @Composable
 private fun PageItem(
@@ -777,9 +806,11 @@ private fun DockBtn(
 private fun ToolIsland(
     tool: EditorTool,
     color: Long,
+    annotationCount: Int,
     onColor: (Long) -> Unit,
     onUndo: () -> Unit,
     onClear: () -> Unit,
+    onExport: () -> Unit,
     onClose: () -> Unit
 ) {
     val colors = LocalColors.current
@@ -832,6 +863,7 @@ private fun ToolIsland(
             Spacer(Modifier.width(4.dp))
             DockBtn(LIcon.Undo, "撤销", false, false, onUndo)
             DockBtn(LIcon.Trash, "清空", false, false, onClear)
+            DockBtn(LIcon.Download, "导出标注", false, false, onExport)
             DockBtn(LIcon.Xmark, "关闭", false, false, onClose)
         }
     }

@@ -10,6 +10,7 @@ import com.lpdf.reader.core.model.PdfResult
 import com.lpdf.reader.data.local.Annotation
 import com.lpdf.reader.data.local.AnnotationDoc
 import com.lpdf.reader.data.local.ReadingMode
+import com.lpdf.reader.data.pdf.PdfFlattener
 import com.lpdf.reader.data.pdf.PdfiumEngine
 import com.lpdf.reader.ui.glass.GlassToast
 import kotlinx.coroutines.Job
@@ -207,6 +208,76 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
     fun flush() {
         val doc = annotations ?: return
         viewModelScope.launch(AppDispatchers.io) { container.annotations.save(doc) }
+    }
+
+    // ---------------------------------------------------------------- 标注扁平化导出
+
+    /** 导出进度：null 表示空闲 */
+    private val _exportProgress = MutableStateFlow<Float?>(null)
+    val exportProgress: StateFlow<Float?> = _exportProgress.asStateFlow()
+
+    /**
+     * 把当前所有标注烧录进 PDF 并写到 [targetUri]（由 SAF 创建，调用方已取得写权限）。
+     *
+     * 原 PDF 不做任何修改；标注 JSON 也保留，导出属于「另存一份带标注的副本」。
+     */
+    fun exportFlattened(targetUri: Uri) {
+        val doc = annotations ?: run {
+            toast("文档尚未就绪")
+            return
+        }
+        if (doc.isEmpty()) {
+            toast("当前没有任何标注可导出")
+            return
+        }
+        if (_exportProgress.value != null) return
+
+        viewModelScope.launch {
+            _exportProgress.value = 0f
+            val pageCount = _state.value.pageCount
+            val cacheDir = container.appContext().cacheDir
+            val tmp = java.io.File(cacheDir, "flat/${doc.docKey}-${System.currentTimeMillis()}.pdf")
+            tmp.parentFile?.mkdirs()
+
+            val res = PdfFlattener.export(
+                resolver = container.resolver(),
+                sourceUri = uri,
+                doc = doc,
+                outFile = tmp,
+                pageCount = pageCount,
+                password = password,
+                progress = { p -> _exportProgress.value = p }
+            )
+
+            when (res) {
+                is PdfResult.Failure -> {
+                    _exportProgress.value = null
+                    toast(res.error.message ?: "导出失败")
+                }
+
+                is PdfResult.Success -> {
+                    // 拷到用户选定位置
+                    val copied = withContext(AppDispatchers.io) {
+                        runCatching {
+                            container.resolver().openOutputStream(targetUri, "w")?.use { out ->
+                                res.value.inputStream().use { it.copyTo(out, 64 * 1024) }
+                            } ?: throw java.io.IOException("无法写入目标位置")
+                        }
+                    }
+                    res.value.delete()
+                    _exportProgress.value = null
+                    if (copied.isSuccess) {
+                        toast("已导出带标注的 PDF（${doc.count()} 处标注）")
+                    } else {
+                        toast("保存失败：${copied.exceptionOrNull()?.message ?: "未知错误"}")
+                    }
+                }
+            }
+        }
+    }
+
+    fun cancelExport() {
+        _exportProgress.value = null
     }
 
     fun toast(text: String) {

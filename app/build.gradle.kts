@@ -1,8 +1,37 @@
+import java.util.Properties as JavaProperties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
+
+/**
+ * 签名配置：
+ * 密钥库文件与口令一律不提交仓库，按以下优先级读取：
+ *   1. 环境变量 LPdf_KEYSTORE_PATH / LPdf_KEYSTORE_PASSWORD / LPdf_KEY_ALIAS / LPdf_KEY_PASSWORD
+ *   2. 本地 keystore.properties（已在 .gitignore 中忽略）
+ * 两者都缺失时 release 走未签名产出，CI 或本地首次构建不会因此失败。
+ */
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = JavaProperties().apply {
+    if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
+}
+
+fun signingValue(envKey: String, propKey: String): String? =
+    (System.getenv(envKey) as String?)?.takeIf { it.isNotEmpty() }
+        ?: keystoreProps.getProperty(propKey)?.takeIf { it.isNotEmpty() }
+
+val releaseStorePath = signingValue("LPdf_KEYSTORE_PATH", "storeFile")
+val releaseStorePassword = signingValue("LPdf_KEYSTORE_PASSWORD", "storePassword")
+val releaseKeyAlias = signingValue("LPdf_KEY_ALIAS", "keyAlias")
+val releaseKeyPassword = signingValue("LPdf_KEY_PASSWORD", "keyPassword")
+
+val hasReleaseSigning = releaseStorePath != null &&
+    releaseStorePassword != null &&
+    releaseKeyAlias != null &&
+    releaseKeyPassword != null &&
+    rootProject.file(releaseStorePath).exists()
 
 android {
     namespace = "com.lpdf.reader"
@@ -12,10 +41,24 @@ android {
         applicationId = "com.lpdf.reader"
         minSdk = 33
         targetSdk = 35
-        versionCode = 110
-        versionName = "1.1.0"
+        versionCode = 120
+        versionName = "1.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(releaseStorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
     }
 
     buildTypes {
@@ -26,6 +69,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // 有密钥则签名，无密钥则产出未签名包（保持原行为，不打断构建）
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
         debug {
             applicationIdSuffix = ".debug"

@@ -14,6 +14,9 @@ local.properties
 captures/
 output.json
 release/
+# ---------- 签名（重要：密钥与口令绝不入库） ----------
+keystore.properties
+keystore/
 *.jks
 *.keystore
 !debug.keystore
