@@ -26,7 +26,8 @@ enum class LIcon {
     HighlightPen, ShapeRect, ShapeOval, TextT, Note, ShapeArrow, Eraser,
     Undo, Redo, Trash, Check, Plus, Rotate, ArrowsH, Copy, Scissors,
     Image, Merge, Split, Compress, Signature, Watermark, FilePlus, PageGrid,
-    Cloud, Sun, Moon, Info, ChevronUpDown
+    Cloud, Sun, Moon, Info, ChevronUpDown,
+    Bookmark, BookmarkFilled
 }
 
 @Composable
@@ -461,6 +462,23 @@ fun LIconView(
             LIcon.Watermark -> {
                 drawCircle(color, radius = s * 0.32f, center = center, style = stroke)
                 drawLine(color, p(0.30f, 0.66f), p(0.70f, 0.34f), sw, StrokeCap.Round)
+            }
+
+            // 书签：上方书签造型，下方留缺口
+            LIcon.Bookmark, LIcon.BookmarkFilled -> {
+                val mark = Path().apply {
+                    moveTo(p(0.28f, 0.14f).x, p(0.28f, 0.14f).y)
+                    lineTo(p(0.72f, 0.14f).x, p(0.72f, 0.14f).y)
+                    lineTo(p(0.72f, 0.86f).x, p(0.72f, 0.86f).y)
+                    lineTo(p(0.50f, 0.66f).x, p(0.50f, 0.66f).y)
+                    lineTo(p(0.28f, 0.86f).x, p(0.28f, 0.86f).y)
+                    close()
+                }
+                if (icon == LIcon.BookmarkFilled) {
+                    drawPath(mark, color)
+                } else {
+                    drawPath(mark, color, style = stroke)
+                }
             }
 
             LIcon.FilePlus -> {

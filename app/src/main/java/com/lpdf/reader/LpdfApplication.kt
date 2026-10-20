@@ -4,8 +4,10 @@ import android.app.Application
 import android.content.Context
 import com.lpdf.reader.core.di.AppDispatchers
 import com.lpdf.reader.data.local.AnnotationStore
+import com.lpdf.reader.data.local.BookmarkStore
 import com.lpdf.reader.data.local.MediaStoreSource
 import com.lpdf.reader.data.local.PrefsRepository
+import com.lpdf.reader.data.local.SignatureStore
 import com.lpdf.reader.data.local.ThumbnailStore
 import com.lpdf.reader.data.network.LinkImporter
 import com.lpdf.reader.data.network.UpdateChecker
@@ -43,6 +45,8 @@ class AppContainer(private val context: Context) {
     val validator = PdfValidator(context.contentResolver)
     val thumbnails = ThumbnailStore(context)
     val annotations = AnnotationStore(context.filesDir)
+    val bookmarks = BookmarkStore(context.filesDir)
+    val signatures = SignatureStore(context.filesDir)
     val linkImporter = LinkImporter(context, prefs)
     val updateChecker = UpdateChecker(context, prefs)
 

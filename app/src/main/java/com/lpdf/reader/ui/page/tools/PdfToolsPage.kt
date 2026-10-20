@@ -41,6 +41,8 @@ import com.lpdf.reader.ui.glass.GlassGroup
 import com.lpdf.reader.ui.glass.GlassIconButton
 import com.lpdf.reader.ui.glass.GlassPillButton
 import com.lpdf.reader.ui.glass.GlassSegmented
+import com.lpdf.reader.ui.glass.GlassSlider
+import com.lpdf.reader.ui.glass.GlassSwitch
 import com.lpdf.reader.ui.glass.GlassSnackbarHost
 import com.lpdf.reader.ui.glass.GlassToast
 import com.lpdf.reader.ui.glass.LIcon
@@ -98,6 +100,20 @@ class ToolsViewModel(private val container: AppContainer) : ViewModel() {
     fun merge(files: List<File>) = run("正在合并…") { out, p ->
         PdfWriterEngine.merge(files, out, p)
     }
+
+    /**
+     * 给整份文档打水印（v1.3）。
+     *
+     * @param pageRange 1-based 页码集合；null 表示全部页
+     */
+    fun watermark(file: File, spec: PdfWriterEngine.WatermarkSpec, pageRange: Set<Int>? = null) =
+        run("正在添加水印…") { out, p ->
+            PdfWriterEngine.watermark(
+                file, out, spec,
+                pageRange = pageRange?.map { it - 1 }?.toSet(),
+                progress = p
+            )
+        }
 
     /** 全部页导出为 PNG，输出到 exports/<时间戳>/ 目录 */
     fun exportAllImages(file: File, totalPages: Int, jpeg: Boolean) {
@@ -477,6 +493,15 @@ private fun PdfToolsContent(
 
             Spacer(Modifier.height(20.dp))
 
+            WatermarkGroup(
+                file = file,
+                totalPages = totalPages,
+                running = state.running,
+                onApply = { spec, range -> vm.watermark(file, spec, range) }
+            )
+
+            Spacer(Modifier.height(20.dp))
+
             GlassGroup("结果") {
                 Row(
                     Modifier.padding(16.dp),
@@ -548,3 +573,184 @@ private fun rememberToolsViewModel(container: AppContainer): ToolsViewModel =
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = ToolsViewModel(container) as T
     })
+
+/**
+ * 水印分组（v1.3）。
+ *
+ * 参数全部以「相对页宽的比例」参与绘制，因此这里滑块暴露的是直观的百分比，
+ * 而不是 pt —— 一份设置在水印到 A4 与大幅面图纸时观感一致。
+ */
+@Composable
+private fun WatermarkGroup(
+    file: File,
+    totalPages: Int,
+    running: Boolean,
+    onApply: (PdfWriterEngine.WatermarkSpec, Set<Int>?) -> Unit
+) {
+    val colors = LocalColors.current
+    var text by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf("机密 · 禁止外传")
+    }
+    var style by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    var fontSize by androidx.compose.runtime.remember { androidx.compose.runtime.mutableFloatStateOf(0.06f) }
+    var angle by androidx.compose.runtime.remember { androidx.compose.runtime.mutableFloatStateOf(-35f) }
+    var alpha by androidx.compose.runtime.remember { androidx.compose.runtime.mutableFloatStateOf(0.22f) }
+    var tile by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(true) }
+    var allPages by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(true) }
+    var rangeText by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf("1-$totalPages")
+    }
+
+    // 预置样式：把「常见组合」做成一键，省得每次拖四条滑块
+    val presets = androidx.compose.runtime.remember {
+        listOf(
+            Triple("常规", 0.06f, 0.22f),
+            Triple("醒目", 0.10f, 0.38f),
+            Triple("浅淡", 0.05f, 0.12f)
+        )
+    }
+
+    GlassGroup("水印") {
+        Column(Modifier.padding(16.dp)) {
+            Text(
+                "文字会平铺或居中盖在页面上，输出为新文件，原文件不变",
+                style = LType.Micro,
+                color = colors.secondary
+            )
+            Spacer(Modifier.height(10.dp))
+            androidx.compose.foundation.text.BasicTextField(
+                value = text,
+                onValueChange = { text = it.take(40) },
+                singleLine = true,
+                textStyle = LType.Body.copy(color = colors.text),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(colors.accent),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+            )
+            GlassDivider(startIndent = 0.dp)
+            Spacer(Modifier.height(12.dp))
+
+            // 预置
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                presets.forEachIndexed { idx, p ->
+                    GlassPillButton(
+                        p.first,
+                        { style = idx; fontSize = p.second; alpha = p.third },
+                        Modifier.weight(1f),
+                        height = 34.dp
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+            SliderRow("字号", "${(fontSize * 100).toInt()}% 页宽") {
+                GlassSlider(
+                    value = fontSize,
+                    onValueChange = { fontSize = it },
+                    valueRange = 0.02f..0.20f,
+                    contentDescription = "水印字号"
+                )
+            }
+            SliderRow("角度", "${angle.toInt()}°") {
+                GlassSlider(
+                    value = angle,
+                    onValueChange = { angle = it },
+                    valueRange = -90f..0f,
+                    contentDescription = "水印角度"
+                )
+            }
+            SliderRow("浓淡", "${(alpha * 100).toInt()}%") {
+                GlassSlider(
+                    value = alpha,
+                    onValueChange = { alpha = it },
+                    valueRange = 0.05f..0.75f,
+                    contentDescription = "水印透明度"
+                )
+            }
+
+            GlassDivider(startIndent = 0.dp)
+            Row(
+                Modifier.padding(vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("平铺整页", style = LType.Body, color = colors.text, modifier = Modifier.weight(1f))
+                GlassSwitch(
+                    checked = tile,
+                    onCheckedChange = { tile = it },
+                    contentDescription = "平铺整页"
+                )
+            }
+            Row(
+                Modifier.padding(bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("全部页", style = LType.Body, color = colors.text, modifier = Modifier.weight(1f))
+                GlassSwitch(
+                    checked = allPages,
+                    onCheckedChange = { allPages = it },
+                    contentDescription = "应用到全部页"
+                )
+            }
+            if (!allPages) {
+                Text(
+                    "页码范围，如 1-3,7（共 $totalPages 页）",
+                    style = LType.Micro,
+                    color = colors.secondary
+                )
+                androidx.compose.foundation.text.BasicTextField(
+                    value = rangeText,
+                    onValueChange = { rangeText = it },
+                    singleLine = true,
+                    textStyle = LType.Body.copy(color = colors.text),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(colors.accent),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                )
+            }
+
+            Spacer(Modifier.height(10.dp))
+            GlassPillButton(
+                text = "应用水印",
+                onClick = {
+                    val spec = PdfWriterEngine.WatermarkSpec(
+                        text = text.trim(),
+                        fontSize = fontSize,
+                        angle = angle,
+                        alpha = alpha,
+                        tile = tile
+                    )
+                    val range = if (allPages) {
+                        null
+                    } else {
+                        Formatters.parsePageRanges(rangeText, totalPages).toSet().ifEmpty { null }
+                    }
+                    // 文字为空时不放行，避免生成一份「原样复制」的文件
+                    if (spec.text.isNotEmpty()) onApply(spec, range)
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !running && text.isNotBlank()
+            )
+        }
+    }
+}
+
+@Composable
+private fun SliderRow(label: String, valueText: String, content: @Composable () -> Unit) {
+    val colors = LocalColors.current
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = LType.Caption, color = colors.text, modifier = Modifier.width(48.dp))
+        Box(Modifier.weight(1f)) { content() }
+        Text(
+            valueText,
+            style = LType.Micro,
+            color = colors.secondary,
+            modifier = Modifier.width(64.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.End
+        )
+    }
+}

@@ -9,6 +9,8 @@ import com.lpdf.reader.core.model.PdfError
 import com.lpdf.reader.core.model.PdfResult
 import com.lpdf.reader.data.local.Annotation
 import com.lpdf.reader.data.local.AnnotationDoc
+import com.lpdf.reader.data.local.Bookmark
+import com.lpdf.reader.data.local.SignatureAsset
 import com.lpdf.reader.data.local.ReadingMode
 import com.lpdf.reader.data.pdf.PdfFlattener
 import com.lpdf.reader.data.pdf.PdfiumEngine
@@ -23,7 +25,7 @@ import kotlinx.coroutines.withContext
 import java.util.UUID
 
 /** 编辑工具 */
-enum class EditorTool { NONE, HIGHLIGHT, INK, NOTE, SHAPE, TEXT, ERASER }
+enum class EditorTool { NONE, HIGHLIGHT, INK, NOTE, SHAPE, TEXT, ERASER, SIGNATURE }
 
 /** 阅读页状态 */
 data class ReaderUiState(
@@ -43,7 +45,26 @@ data class ReaderUiState(
     val zoom: Float = 1f,
     val highlightColor: Long = 0xFFFFD60A,
     val editing: Boolean = false,
-    val dirty: Boolean = false
+    val dirty: Boolean = false,
+
+    // ---- v1.3 书签 ----
+    val bookmarks: List<Bookmark> = emptyList(),
+    val bookmarksOpen: Boolean = false,
+    /** 当前页是否已加书签 */
+    val currentPageBookmarked: Boolean = false,
+
+    // ---- v1.3 全文搜索 ----
+    val searchOpen: Boolean = false,
+    val searchQuery: String = "",
+    val searchHits: List<PdfiumEngine.SearchHit> = emptyList(),
+    val searching: Boolean = false,
+    val searchProgress: Pair<Int, Int>? = null,
+    /** 当前聚焦的命中下标，-1 表示无 */
+    val activeHit: Int = -1,
+    val matchCase: Boolean = false,
+
+    // ---- v1.3 签名 ----
+    val signatureOpen: Boolean = false
 )
 
 /**
@@ -116,6 +137,7 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
                         toc = toc,
                         annotationCount = doc.count()
                     )
+                    reloadBookmarks()
                 }
             }
         }
@@ -142,7 +164,11 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
     fun onPageSettled(page: Int) {
         if (_state.value.currentPage == page) return
-        _state.value = _state.value.copy(currentPage = page)
+        val bm = _state.value.bookmarks
+        _state.value = _state.value.copy(
+            currentPage = page,
+            currentPageBookmarked = bm.any { it.page == page }
+        )
         progressJob?.cancel()
         progressJob = viewModelScope.launch {
             delay(800)
@@ -278,6 +304,281 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
     fun cancelExport() {
         _exportProgress.value = null
+    }
+
+    // ---------------------------------------------------------------- 签名（v1.3）
+
+    /** 签名库列表（面板展示用） */
+    private val _signatures = MutableStateFlow<List<SignatureAsset>>(emptyList())
+    val signatures: StateFlow<List<SignatureAsset>> = _signatures.asStateFlow()
+
+    fun loadSignatures() {
+        viewModelScope.launch {
+            _signatures.value = withContext(AppDispatchers.io) { container.signatures.list() }
+        }
+    }
+
+    /**
+     * 把签名贴到当前页。
+     *
+     * 落位规则：水平居中、纵向放在页面偏下（常见签署位置）。
+     * 宽占页面 34%，高度按图片宽高比推算 —— 直接给固定高宽比会把长签名压扁。
+     */
+    private fun placeSignature(asset: SignatureAsset) {
+        val page = _state.value.currentPage
+        val bmp = runCatching { android.graphics.BitmapFactory.decodeFile(asset.path) }.getOrNull()
+        val ratio = if (bmp != null && bmp.width > 0) {
+            bmp.height.toFloat() / bmp.width.toFloat()
+        } else {
+            0.4f
+        }
+        bmp?.recycle()
+
+        val w = 0.34f
+        val h = (w * ratio).coerceIn(0.04f, 0.4f)
+        val left = (1f - w) / 2f
+        val top = (0.72f - h / 2f).coerceIn(0.05f, 0.92f)
+
+        addAnnotation(
+            page,
+            Annotation.Signature(
+                id = newId(),
+                bounds = com.lpdf.reader.data.local.AnnotRect(left, top, left + w, top + h),
+                bitmapPath = asset.path
+            )
+        )
+        toast("签名已贴到第 ${page + 1} 页")
+    }
+
+    /** 手写签名：先入库，再贴到当前页，保证下次能复用 */
+    fun saveAndPlaceSignature(bitmap: android.graphics.Bitmap, name: String) {
+        viewModelScope.launch {
+            val cropped = withContext(AppDispatchers.io) {
+                com.lpdf.reader.data.local.cropSignature(bitmap)
+            }
+            val asset = withContext(AppDispatchers.io) {
+                container.signatures.save(cropped, name)
+            }
+            if (cropped !== bitmap) cropped.recycle()
+            bitmap.recycle()
+
+            if (asset == null) {
+                toast("签名保存失败")
+                return@launch
+            }
+            loadSignatures()
+            placeSignature(asset)
+        }
+    }
+
+    fun pickSignature(asset: SignatureAsset) = placeSignature(asset)
+
+    fun deleteSignature(id: String) {
+        viewModelScope.launch {
+            withContext(AppDispatchers.io) { container.signatures.delete(id) }
+            loadSignatures()
+            toast("已删除签名")
+        }
+    }
+
+    fun toggleSignaturePanel() {
+        val open = !_state.value.signatureOpen
+        _state.value = _state.value.copy(
+            signatureOpen = open,
+            tool = if (open) EditorTool.SIGNATURE else EditorTool.NONE
+        )
+        if (open) loadSignatures()
+    }
+
+    fun closeSignaturePanel() {
+        _state.value = _state.value.copy(signatureOpen = false)
+        if (_state.value.tool == EditorTool.SIGNATURE) {
+            _state.value = _state.value.copy(tool = EditorTool.NONE)
+        }
+    }
+
+    // ---------------------------------------------------------------- 书签（v1.3）
+
+    private fun reloadBookmarks() {
+        if (docKey.isEmpty()) return
+        viewModelScope.launch {
+            val list = withContext(AppDispatchers.io) { container.bookmarks.load(docKey) }
+            val cur = _state.value.currentPage
+            _state.value = _state.value.copy(
+                bookmarks = list,
+                currentPageBookmarked = list.any { it.page == cur }
+            )
+        }
+    }
+
+    fun toggleBookmarksPanel() = _state.value.let {
+        _state.value = it.copy(bookmarksOpen = !it.bookmarksOpen, tocOpen = false)
+    }
+
+    fun closeBookmarks() = _state.value.let { _state.value = it.copy(bookmarksOpen = false) }
+
+    /** 当前页加/取消书签；无标题时自动命名为「第 N 页」 */
+    fun toggleBookmarkOnCurrentPage(label: String? = null) {
+        val s = _state.value
+        if (docKey.isEmpty()) return
+        val page = s.currentPage
+        val existing = s.bookmarks.firstOrNull { it.page == page }
+
+        viewModelScope.launch {
+            val next = if (existing != null) {
+                s.bookmarks.filterNot { it.id == existing.id }
+            } else {
+                s.bookmarks + Bookmark(
+                    id = newId(),
+                    page = page,
+                    label = label?.takeIf { it.isNotBlank() } ?: "第 ${page + 1} 页",
+                    createdAt = System.currentTimeMillis()
+                )
+            }
+            withContext(AppDispatchers.io) { container.bookmarks.save(docKey, next) }
+            _state.value = _state.value.copy(
+                bookmarks = next.sortedBy { it.page },
+                currentPageBookmarked = existing == null
+            )
+            toast(if (existing != null) "已移除书签" else "已添加书签")
+        }
+    }
+
+    fun renameBookmark(id: String, label: String) {
+        val s = _state.value
+        if (label.isBlank()) return
+        viewModelScope.launch {
+            val next = s.bookmarks.map { if (it.id == id) it.copy(label = label.trim()) else it }
+            withContext(AppDispatchers.io) { container.bookmarks.save(docKey, next) }
+            _state.value = _state.value.copy(bookmarks = next.sortedBy { it.page })
+        }
+    }
+
+    fun removeBookmark(id: String) {
+        val s = _state.value
+        viewModelScope.launch {
+            val next = s.bookmarks.filterNot { it.id == id }
+            withContext(AppDispatchers.io) { container.bookmarks.save(docKey, next) }
+            _state.value = _state.value.copy(
+                bookmarks = next,
+                currentPageBookmarked = next.any { it.page == s.currentPage }
+            )
+            toast("已删除书签")
+        }
+    }
+
+    // ---------------------------------------------------------------- 全文搜索（v1.3）
+
+    private var searchJob: Job? = null
+
+    fun openSearch() = _state.value.let {
+        _state.value = it.copy(searchOpen = true, tocOpen = false, bookmarksOpen = false)
+    }
+
+    fun closeSearch() {
+        searchJob?.cancel()
+        _state.value = _state.value.copy(
+            searchOpen = false,
+            searchHits = emptyList(),
+            activeHit = -1,
+            searching = false,
+            searchProgress = null
+        )
+    }
+
+    fun setSearchQuery(q: String) = _state.value.let { _state.value = it.copy(searchQuery = q) }
+
+    fun toggleMatchCase() = _state.value.let {
+        _state.value = it.copy(matchCase = !it.matchCase)
+        if (it.searchQuery.isNotBlank()) runSearch(it.searchQuery)
+    }
+
+    /** 执行搜索。结果按页升序、页内按字符序，便于「下一处」线性推进 */
+    fun runSearch(query: String) {
+        val s = _state.value
+        if (query.isBlank() || docKey.isEmpty()) {
+            _state.value = s.copy(searchHits = emptyList(), activeHit = -1)
+            return
+        }
+        searchJob?.cancel()
+        _state.value = s.copy(
+            searchQuery = query,
+            searching = true,
+            searchProgress = 0 to s.pageCount,
+            searchHits = emptyList(),
+            activeHit = -1
+        )
+        searchJob = viewModelScope.launch {
+            val res = PdfiumEngine.search(
+                resolver = container.resolver(),
+                uri = uri,
+                query = query.trim(),
+                password = password,
+                matchCase = _state.value.matchCase,
+                onProgress = { scanned, total ->
+                    _state.value = _state.value.copy(searchProgress = scanned to total)
+                }
+            )
+            when (res) {
+                is PdfResult.Failure -> {
+                    _state.value = _state.value.copy(searching = false, searchProgress = null)
+                    toast(res.error.message ?: "搜索失败")
+                }
+
+                is PdfResult.Success -> {
+                    val hits = res.value.sortedWith(
+                        compareBy({ it.page }, { it.charIndex })
+                    )
+                    _state.value = _state.value.copy(
+                        searchHits = hits,
+                        searching = false,
+                        searchProgress = null,
+                        activeHit = if (hits.isEmpty()) -1 else 0
+                    )
+                    if (hits.isEmpty()) toast("没有找到「$query」")
+                }
+            }
+        }
+    }
+
+    /** 下一处 / 上一处。返回目标页供 UI 滚动 */
+    fun stepHit(forward: Boolean): Int? {
+        val s = _state.value
+        val hits = s.searchHits
+        if (hits.isEmpty()) return null
+        val cur = s.activeHit
+        // 首次点击时，从当前阅读页开始找最近的一处，而不是粗暴跳到第 0 条
+        val next = if (cur < 0) {
+            hits.indexOfFirst { it.page >= s.currentPage }.takeIf { it >= 0 } ?: 0
+        } else {
+            if (forward) (cur + 1) % hits.size else (cur - 1 + hits.size) % hits.size
+        }
+        _state.value = s.copy(activeHit = next)
+        return hits[next].page
+    }
+
+    /** 点击某条结果直接跳转 */
+    fun jumpToHit(index: Int): Int? {
+        val hits = _state.value.searchHits
+        if (index !in hits.indices) return null
+        _state.value = _state.value.copy(activeHit = index)
+        return hits[index].page
+    }
+
+    /** 当前页上的命中矩形（用于叠加高亮） */
+    fun hitRectsOnPage(page: Int): List<PdfiumEngine.AnnotRectLike> {
+        val s = _state.value
+        if (s.searchHits.isEmpty()) return emptyList()
+        return s.searchHits.filter { it.page == page }.flatMap { it.rects }
+    }
+
+    /** 当前聚焦命中的唯一矩形（用强调色区分），无则为空 */
+    fun activeHitRectsOnPage(page: Int): List<PdfiumEngine.AnnotRectLike> {
+        val s = _state.value
+        val idx = s.activeHit
+        if (idx !in s.searchHits.indices) return emptyList()
+        val hit = s.searchHits[idx]
+        return if (hit.page == page) hit.rects else emptyList()
     }
 
     fun toast(text: String) {

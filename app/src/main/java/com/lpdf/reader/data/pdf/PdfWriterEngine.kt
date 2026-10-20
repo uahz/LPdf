@@ -113,9 +113,194 @@ object PdfWriterEngine {
         }
     }
 
+    /**
+     * 水印参数（v1.3）。
+     *
+     * @param text 文字水印内容；为空时用 [imagePath]
+     * @param fontSize 相对页宽的比例（0.02~0.20），而非绝对 pt，
+     *        这样同一份设置在水印到 A4 与大幅面图纸时视觉比例一致
+     * @param angle 旋转角度（度），常用 -30 ~ -45
+     * @param alpha 透明度 0~1
+     * @param tile true 平铺，false 单枚居中
+     */
+    data class WatermarkSpec(
+        val text: String = "",
+        val imagePath: String? = null,
+        val fontSize: Float = 0.06f,
+        val color: Long = 0xFF8A8A8E,
+        val angle: Float = -35f,
+        val alpha: Float = 0.22f,
+        val tile: Boolean = true,
+        val tileGap: Float = 0.28f
+    )
+
+    /**
+     * 给整个文档打水印（v1.3）。
+     *
+     * 实现路线与 [com.lpdf.reader.data.pdf.PdfFlattener] 一致：
+     * 逐页渲染底图 → 画水印 → 组装新 PDF。
+     * 这意味着**输出文件不再保留可选文字**，是已知取舍；
+     * 若要保留矢量文字需要 PDF 对象级写入，当前无可靠方案。
+     */
+    suspend fun watermark(
+        src: File,
+        outFile: File,
+        spec: WatermarkSpec,
+        pageRange: Set<Int>? = null,
+        progress: (Float) -> Unit = {}
+    ): PdfResult<File> = withContext(Dispatchers.IO) {
+        synchronized(lock) {
+            val target = android.graphics.pdf.PdfDocument()
+            var wmBitmap: Bitmap? = null
+            try {
+                ParcelFileDescriptor.open(src, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+                    PdfRenderer(pfd).use { renderer ->
+                        val total = renderer.pageCount
+                        if (total <= 0) return@synchronized PdfResult.Failure(PdfError.Corrupted("文档没有可读页面"))
+
+                        // 图片水印只解码一次
+                        if (spec.text.isBlank() && spec.imagePath != null) {
+                            wmBitmap = runCatching {
+                                android.graphics.BitmapFactory.decodeFile(spec.imagePath)
+                            }.getOrNull()
+                        }
+
+                        for (i in 0 until total) {
+                            renderer.openPage(i).use { page ->
+                                val wPt = page.width
+                                val hPt = page.height
+                                val info = android.graphics.pdf.PdfDocument.PageInfo
+                                    .Builder(wPt, hPt, i + 1).create()
+                                val dest = target.startPage(info)
+                                val canvas: Canvas = dest.canvas
+
+                                // 底图：按页宽 2 倍渲染，上限 1600 防 OOM
+                                val bmpW = (wPt * 2).coerceIn(160, 1600)
+                                val bmpH = (bmpW.toFloat() * hPt / wPt).toInt().coerceAtLeast(1)
+                                val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+                                bmp.eraseColor(Color.WHITE)
+                                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                canvas.drawBitmap(
+                                    bmp, null,
+                                    android.graphics.RectF(0f, 0f, wPt.toFloat(), hPt.toFloat()),
+                                    Paint(Paint.FILTER_BITMAP_FLAG)
+                                )
+                                bmp.recycle()
+
+                                // 水印：仅在指定页码范围
+                                if (pageRange == null || pageRange.contains(i)) {
+                                    drawWatermark(canvas, wPt.toFloat(), hPt.toFloat(), spec, wmBitmap)
+                                }
+
+                                target.finishPage(dest)
+                            }
+                            progress((i + 1).toFloat() / total)
+                        }
+                    }
+                }
+                outFile.parentFile?.mkdirs()
+                outFile.outputStream().use { target.writeTo(it) }
+                PdfResult.Success(outFile)
+            } catch (e: Exception) {
+                PdfResult.Failure(PdfError.WriteFailed("写入水印失败：${e.message}"))
+            } finally {
+                runCatching { wmBitmap?.recycle() }
+                target.close()
+            }
+        }
+    }
+
+    /**
+     * 水印字号：按页宽比例算，但给绝对上下限兜底。
+     * 极小页宽（如名片）不至于看不清，极大页宽（如 A0 图纸）不至于糊满。
+     */
+    internal fun watermarkTextSize(pageWidth: Float, ratio: Float): Float =
+        (pageWidth * ratio.coerceIn(0.01f, 0.4f)).coerceIn(8f, pageWidth * 0.4f)
+
+    /** 平铺步进：行距与列距，抽出来便于单测覆盖 */
+    internal fun watermarkTileSteps(
+        pageWidth: Float,
+        textWidth: Float,
+        gapRatio: Float,
+        hasText: Boolean
+    ): Pair<Float, Float> {
+        val step = (pageWidth * gapRatio.coerceAtLeast(0.05f)).coerceAtLeast(60f)
+        val measured = if (hasText) textWidth else pageWidth * 0.3f
+        val stepX = (measured + step * 0.8f).coerceAtLeast(80f)
+        return stepX to step
+    }
+
+    private fun drawWatermark(
+        canvas: Canvas,
+        w: Float,
+        h: Float,
+        spec: WatermarkSpec,
+        image: Bitmap?
+    ) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = spec.color.toInt()
+            alpha = (spec.alpha.coerceIn(0f, 1f) * 255).toInt()
+            style = Paint.Style.FILL
+            textAlign = Paint.Align.CENTER
+            // 水印要压得住又看得见，粗体比常规体更容易辨认
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+
+        if (spec.text.isNotBlank()) {
+            paint.textSize = watermarkTextSize(w, spec.fontSize)
+        }
+
+        val useImage = spec.text.isBlank() && image != null && !image.isRecycled
+
+        canvas.save()
+        canvas.rotate(spec.angle, w / 2f, h / 2f)
+
+        if (!spec.tile) {
+            // 单枚居中
+            if (useImage) {
+                drawWmImage(canvas, image!!, w / 2f, h / 2f, w * 0.4f, paint)
+            } else if (spec.text.isNotBlank()) {
+                canvas.drawText(spec.text, w / 2f, h / 2f + paint.textSize / 3f, paint)
+            }
+        } else {
+            // 平铺：按行距步进，交错排列避免单调
+            val (stepX, step) = watermarkTileSteps(
+                w, paint.measureText(spec.text), spec.tileGap, spec.text.isNotBlank()
+            )
+            var row = 0
+            var y = -h * 0.2f
+            while (y < h * 1.2f) {
+                val offset = if (row % 2 == 0) 0f else stepX / 2f
+                var x = -w * 0.2f + offset
+                while (x < w * 1.2f) {
+                    if (useImage) {
+                        drawWmImage(canvas, image!!, x, y, w * 0.22f, paint)
+                    } else if (spec.text.isNotBlank()) {
+                        canvas.drawText(spec.text, x, y, paint)
+                    }
+                    x += stepX
+                }
+                y += step
+                row++
+            }
+        }
+
+        canvas.restore()
+    }
+
+    private fun drawWmImage(canvas: Canvas, bmp: Bitmap, cx: Float, cy: Float, targetW: Float, paint: Paint) {
+        val ratio = bmp.height.toFloat() / bmp.width.toFloat().coerceAtLeast(1f)
+        val w = targetW.coerceAtLeast(8f)
+        val h = w * ratio
+        canvas.drawBitmap(
+            bmp, null,
+            android.graphics.RectF(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f),
+            paint
+        )
+    }
+
     /** 合并多个 PDF（保持原页顺序） */
-    suspend fun merge(files: List<File>, outFile: File, progress: (Float) -> Unit = {}): PdfResult<File> {
-        val refs = mutableListOf<PageRef>()
+    suspend fun merge(files: List<File>, outFile: File, progress: (Float) -> Unit = {}): PdfResult<File> {        val refs = mutableListOf<PageRef>()
         files.forEach { f ->
             ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
                 PdfRenderer(pfd).use { r ->

@@ -8,8 +8,11 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import com.lpdf.reader.core.model.PdfError
 import com.lpdf.reader.core.model.PdfResult
+import io.legere.pdfiumandroid.FindFlags
+import io.legere.pdfiumandroid.FindResult
 import io.legere.pdfiumandroid.PdfDocument
 import io.legere.pdfiumandroid.PdfPage
+import io.legere.pdfiumandroid.PdfTextPage
 import io.legere.pdfiumandroid.PdfiumCore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -206,6 +209,127 @@ object PdfiumEngine {
                 }
             }
         }
+
+    /**
+     * 全文搜索（v1.3）。
+     *
+     * 在**同一个**已打开文档内逐页搜索，避免循环里反复 openDocument 造成 IO 爆炸。
+     * 命中结果带回归一化矩形（0~1），可直接用于阅读页叠加高亮。
+     *
+     * @param maxResults 命中上限，防止「的」这类高频词把内存打满
+     * @param matchCase 是否区分大小写
+     * @param onProgress 进度回调（已扫描页数 / 总页数）
+     */
+    data class SearchHit(
+        val page: Int,
+        val snippet: String,
+        val rects: List<AnnotRectLike>,
+        /** 匹配到的起始字符序号，用于「上一个 / 下一个」定位 */
+        val charIndex: Int
+    )
+
+    /** 归一化矩形（避免 data 层依赖 UI 层模型） */
+    data class AnnotRectLike(val left: Float, val top: Float, val right: Float, val bottom: Float)
+
+    suspend fun search(
+        resolver: ContentResolver,
+        uri: Uri,
+        query: String,
+        password: String? = null,
+        matchCase: Boolean = false,
+        maxResults: Int = 300,
+        onProgress: (scanned: Int, total: Int) -> Unit = { _, _ -> }
+    ): PdfResult<List<SearchHit>> = withContext(Dispatchers.IO) {
+        if (query.isBlank()) return@withContext PdfResult.Success(emptyList())
+
+        MUTEX.withLock {
+            var pfd: ParcelFileDescriptor? = null
+            var textPage: PdfTextPage? = null
+            var find: FindResult? = null
+            try {
+                pfd = resolver.openFileDescriptor(uri, "r")
+                    ?: return@withLock PdfResult.Failure(PdfError.NotFound())
+                val core = core()
+                val doc = core.newDocument(pfd, password ?: "")
+                val total: Int = doc.getPageCount().toInt()
+                val hits = mutableListOf<SearchHit>()
+                val flags = if (matchCase) setOf(FindFlags.MatchCase) else emptySet()
+
+                for (p in 0 until total) {
+                    if (hits.size >= maxResults) break
+                    onProgress(p, total)
+
+                    val page = doc.openPage(p)
+                    // 页面点位尺寸，用于把 char box 归一化
+                    val pageW = page.getPageWidthPoint().toFloat().coerceAtLeast(1f)
+                    val pageH = page.getPageHeightPoint().toFloat().coerceAtLeast(1f)
+                    val tp = page.openTextPage()
+                    textPage = tp
+
+                    var start = 0
+                    var guard = 0
+                    while (hits.size < maxResults && guard++ < 500) {
+                        val fr = tp.findStart(query, flags, start) ?: break
+                        find = fr
+                        val idx = fr.getSchResultIndex()
+                        val count = fr.getSchCount()
+                        if (idx < 0) break
+
+                        // 该匹配覆盖的矩形（通常 1~2 个）
+                        val rects = buildList {
+                            val n = tp.textPageCountRects(idx, idx + count)
+                            val maxRects = n.coerceAtMost(8)
+                            for (k in 0 until maxRects) {
+                                val r = tp.textPageGetRect(k)
+                                if (r != null && r.width() > 0f && r.height() > 0f) {
+                                    add(
+                                        AnnotRectLike(
+                                            left = (r.left / pageW).coerceIn(0f, 1f),
+                                            top = (r.top / pageH).coerceIn(0f, 1f),
+                                            right = (r.right / pageW).coerceIn(0f, 1f),
+                                            bottom = (r.bottom / pageH).coerceIn(0f, 1f)
+                                        )
+                                    )
+                                }
+                            }
+                        }
+
+                        val snippet = runCatching {
+                            val totalChars = tp.textPageCountChars()
+                            val from = (idx - 20).coerceAtLeast(0)
+                            val to = (idx + count + 30).coerceAtMost(totalChars)
+                            val raw = tp.textPageGetText(from, to - from) ?: ""
+                            raw.replace(Regex("\\s+"), " ").trim()
+                        }.getOrElse { "" }
+
+                        hits += SearchHit(p, snippet.ifBlank { query }, rects, idx)
+                        fr.closeFind()
+                        find = null
+                        start = idx + count
+                        if (start <= idx) break
+                    }
+
+                    textPage = null
+                    runCatching { tp.close() }
+                    runCatching { page.close() }
+                }
+
+                runCatching { find?.closeFind() }
+                runCatching { textPage?.close() }
+                core.closeDocument(doc)
+                onProgress(total, total)
+                PdfResult.Success(hits)
+            } catch (e: SecurityException) {
+                PdfResult.Failure(PdfError.PermissionDenied())
+            } catch (t: Throwable) {
+                PdfResult.Failure(PdfError.Unknown("搜索失败", t))
+            } finally {
+                runCatching { find?.closeFind() }
+                runCatching { textPage?.close() }
+                runCatching { pfd?.close() }
+            }
+        }
+    }
 
     const val MAX_RENDER_WIDTH = 2048
 }

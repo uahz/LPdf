@@ -317,6 +317,7 @@ fun PdfReaderPage(
                         vm.toast("已清空本页标注")
                     },
                     onExport = { exportLauncher.launch(suggestExportName(state.displayName)) },
+                    onSignature = vm::toggleSignaturePanel,
                     onClose = { vm.setTool(EditorTool.NONE) }
                 )
             }
@@ -332,11 +333,17 @@ fun PdfReaderPage(
                     haptic = settings.hapticFeedback,
                     tool = state.tool,
                     tocOpen = state.tocOpen,
+                    bookmarkCount = state.bookmarks.size,
+                    bookmarked = state.currentPageBookmarked,
+                    searchActive = state.searchOpen || state.searchHits.isNotEmpty(),
                     onTool = { t ->
                         vm.setTool(if (state.tool == t) EditorTool.NONE else t)
                         if (t == EditorTool.NONE) vm.closeToolIsland()
                     },
                     onToc = vm::toggleToc,
+                    onBookmarks = vm::toggleBookmarksPanel,
+                    onSearch = vm::openSearch,
+                    onBookmarkToggle = { vm.toggleBookmarkOnCurrentPage() },
                     onPrev = { vm.onPageSettled((state.currentPage - 1).coerceAtLeast(0)) },
                     onNext = { vm.onPageSettled((state.currentPage + 1).coerceAtMost(state.pageCount - 1)) }
                 )
@@ -359,6 +366,125 @@ fun PdfReaderPage(
                     },
                     onClose = vm::closeToc
                 )
+            }
+
+            // 书签面板
+            AnimatedVisibility(
+                visible = state.bookmarksOpen,
+                enter = slideInHorizontally(initialOffsetX = { it }),
+                exit = slideOutHorizontally(targetOffsetX = { it }),
+                modifier = Modifier.align(Alignment.CenterEnd)
+            ) {
+                BookmarkPanel(
+                    bookmarks = state.bookmarks,
+                    current = state.currentPage,
+                    onPick = { page ->
+                        vm.onPageSettled(page)
+                        scope.launch { runCatching { listState.scrollToItem(page) } }
+                        vm.closeBookmarks()
+                    },
+                    onAddHere = {
+                        vm.toggleBookmarkOnCurrentPage()
+                        vm.closeBookmarks()
+                    },
+                    onRename = vm::renameBookmark,
+                    onRemove = vm::removeBookmark,
+                    onClose = vm::closeBookmarks
+                )
+            }
+
+            // 搜索面板
+            AnimatedVisibility(
+                visible = state.searchOpen,
+                enter = slideInHorizontally(initialOffsetX = { it }),
+                exit = slideOutHorizontally(targetOffsetX = { it }),
+                modifier = Modifier.align(Alignment.CenterEnd)
+            ) {
+                SearchPanel(
+                    query = state.searchQuery,
+                    hits = state.searchHits,
+                    searching = state.searching,
+                    progress = state.searchProgress,
+                    activeHit = state.activeHit,
+                    matchCase = state.matchCase,
+                    onQuery = vm::setSearchQuery,
+                    onSubmit = vm::runSearch,
+                    onToggleMatchCase = vm::toggleMatchCase,
+                    onJump = { i ->
+                        vm.jumpToHit(i)?.let { page ->
+                            vm.onPageSettled(page)
+                            scope.launch { runCatching { listState.scrollToItem(page) } }
+                        }
+                    },
+                    onClose = vm::closeSearch
+                )
+            }
+
+            // 搜索结果在页面上的叠加高亮（不写入文件，纯显示层）
+            if (state.searchHits.isNotEmpty() && !state.searchOpen) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(
+                            bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 96.dp
+                        )
+                ) {
+                    LiquidGlass(Modifier.height(40.dp), shape = pillShape(40f)) {
+                        Row(
+                            Modifier
+                                .height(40.dp)
+                                .padding(horizontal = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            DockBtn(LIcon.ChevronUp, "上一处", false, false, 32.dp) {
+                                vm.stepHit(false)?.let { page ->
+                                    vm.onPageSettled(page)
+                                    scope.launch { runCatching { listState.scrollToItem(page) } }
+                                }
+                            }
+                            Text(
+                                "${state.activeHit + 1} / ${state.searchHits.size}",
+                                style = LType.Micro,
+                                color = colors.text,
+                                modifier = Modifier.padding(horizontal = 8.dp)
+                            )
+                            DockBtn(LIcon.ChevronDown, "下一处", false, false, 32.dp) {
+                                vm.stepHit(true)?.let { page ->
+                                    vm.onPageSettled(page)
+                                    scope.launch { runCatching { listState.scrollToItem(page) } }
+                                }
+                            }
+                            Box(Modifier.width(4.dp))
+                            DockBtn(LIcon.Xmark, "关闭搜索", false, false, 32.dp) { vm.closeSearch() }
+                        }
+                    }
+                }
+            }
+
+            // 签名面板
+            AnimatedVisibility(
+                visible = state.signatureOpen,
+                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(
+                        bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 88.dp
+                    )
+            ) {
+                val sigs by vm.signatures.collectAsState()
+                Box(Modifier.padding(horizontal = LSpace.pageHorizontal)) {
+                    SignaturePad(
+                        signatures = sigs,
+                        onSave = { bmp, name -> vm.saveAndPlaceSignature(bmp, name) },
+                        onPick = { asset ->
+                            vm.pickSignature(asset)
+                            vm.closeSignaturePanel()
+                        },
+                        onDelete = vm::deleteSignature,
+                        onClose = vm::closeSignaturePanel
+                    )
+                }
             }
 
             GlassSnackbarHost(
@@ -441,6 +567,8 @@ private fun PageItem(
                 annotations = vm.annotationsOf(page),
                 tool = tool,
                 highlightColor = highlightColor,
+                searchRects = vm.hitRectsOnPage(page),
+                activeSearchRects = vm.activeHitRectsOnPage(page),
                 onAdd = { vm.addAnnotation(page, it) }
             )
         }
@@ -510,10 +638,25 @@ private fun AnnotationLayer(
     annotations: List<Annotation>,
     tool: EditorTool,
     highlightColor: Long,
+    searchRects: List<com.lpdf.reader.data.pdf.PdfiumEngine.AnnotRectLike> = emptyList(),
+    activeSearchRects: List<com.lpdf.reader.data.pdf.PdfiumEngine.AnnotRectLike> = emptyList(),
     onAdd: (Annotation) -> Unit
 ) {
     val image = remember(bitmap) { bitmap.asImageBitmap() }
     val ink = remember { mutableListOf<Offset>() }
+
+    // 签名位图缓存：路径 -> ImageBitmap。签名图不大且复用频繁，按路径记忆即可
+    val signatureBitmaps = remember(bitmap, annotations) {
+        buildMap {
+            annotations.filterIsInstance<Annotation.Signature>().forEach { s ->
+                if (!containsKey(s.bitmapPath)) {
+                    runCatching {
+                        android.graphics.BitmapFactory.decodeFile(s.bitmapPath)
+                    }.getOrNull()?.let { put(s.bitmapPath, it.asImageBitmap()) }
+                }
+            }
+        }
+    }
 
     Box(
         Modifier
@@ -589,6 +732,29 @@ private fun AnnotationLayer(
         Canvas(Modifier.matchParentSize()) {
             val w = size.width
             val h = size.height
+
+            // 搜索结果高亮：先铺淡黄底，再把当前聚焦的命中覆上橙色
+            searchRects.forEach { r ->
+                drawRect(
+                    color = Color(0xFFFFD60A).copy(alpha = 0.30f),
+                    topLeft = Offset(r.left * w, r.top * h),
+                    size = Size(
+                        ((r.right - r.left) * w).coerceAtLeast(1f),
+                        ((r.bottom - r.top) * h).coerceAtLeast(1f)
+                    )
+                )
+            }
+            activeSearchRects.forEach { r ->
+                drawRect(
+                    color = Color(0xFFFF9F0A).copy(alpha = 0.52f),
+                    topLeft = Offset(r.left * w, r.top * h),
+                    size = Size(
+                        ((r.right - r.left) * w).coerceAtLeast(1f),
+                        ((r.bottom - r.top) * h).coerceAtLeast(1f)
+                    )
+                )
+            }
+
             annotations.forEach { a ->
                 when (a) {
                     is Annotation.Highlight -> a.rects.forEach { r ->
@@ -628,6 +794,37 @@ private fun AnnotationLayer(
                         // 批注点位统一用当前高亮色绘制
                         drawCircle(Color(highlightColor), radius = 10f, center = Offset(cx, cy))
                         drawCircle(Color.White, radius = 4f, center = Offset(cx, cy))
+                    }
+
+                    is Annotation.Signature -> {
+                        // 签名图片按归一化边界铺满；文件缺失时画虚线框提示，不静默丢弃
+                        val bmp = signatureBitmaps[a.bitmapPath]
+                        val dst = androidx.compose.ui.geometry.Rect(
+                            a.bounds.left * w,
+                            a.bounds.top * h,
+                            a.bounds.right * w,
+                            a.bounds.bottom * h
+                        )
+                        if (bmp != null) {
+                            drawImage(
+                                image = bmp,
+                                dstOffset = androidx.compose.ui.unit.IntOffset(
+                                    dst.left.toInt(), dst.top.toInt()
+                                ),
+                                dstSize = androidx.compose.ui.unit.IntSize(
+                                    (dst.width).toInt().coerceAtLeast(1),
+                                    (dst.height).toInt().coerceAtLeast(1)
+                                ),
+                                filterQuality = androidx.compose.ui.graphics.FilterQuality.Medium
+                            )
+                        } else {
+                            drawRect(
+                                color = Color(0xFFFF3B30).copy(alpha = 0.55f),
+                                topLeft = Offset(dst.left, dst.top),
+                                size = Size(dst.width, dst.height),
+                                style = Stroke(1.5f)
+                            )
+                        }
                     }
 
                     else -> Unit
@@ -729,8 +926,14 @@ private fun ReaderDock(
     haptic: Boolean,
     tool: EditorTool,
     tocOpen: Boolean,
+    bookmarkCount: Int,
+    bookmarked: Boolean,
+    searchActive: Boolean,
     onTool: (EditorTool) -> Unit,
     onToc: () -> Unit,
+    onBookmarks: () -> Unit,
+    onSearch: () -> Unit,
+    onBookmarkToggle: () -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit
 ) {
@@ -749,17 +952,18 @@ private fun ReaderDock(
             Row(
                 Modifier
                     .height(LSpace.dockHeight)
-                    .padding(horizontal = 8.dp),
+                    .padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                horizontalArrangement = Arrangement.spacedBy(0.dp)
             ) {
                 DockBtn(LIcon.ChevronLeft, "上一页", false, haptic) { onPrev() }
                 DockBtn(LIcon.List, "目录", tocOpen, haptic) { onToc() }
+                DockBtn(LIcon.Bookmark, "书签", bookmarked, haptic) { onBookmarks() }
+                DockBtn(LIcon.Search, "搜索", searchActive, haptic) { onSearch() }
                 DockBtn(LIcon.HighlightPen, "高亮", tool == EditorTool.HIGHLIGHT, haptic) {
                     onTool(EditorTool.HIGHLIGHT)
                 }
                 DockBtn(LIcon.Pencil, "墨迹", tool == EditorTool.INK, haptic) { onTool(EditorTool.INK) }
-                DockBtn(LIcon.ShapeRect, "形状", tool == EditorTool.SHAPE, haptic) { onTool(EditorTool.SHAPE) }
                 DockBtn(LIcon.Note, "批注", tool == EditorTool.NOTE, haptic) { onTool(EditorTool.NOTE) }
                 DockBtn(LIcon.ChevronRight, "下一页", false, haptic) { onNext() }
             }
@@ -773,6 +977,7 @@ private fun DockBtn(
     label: String,
     active: Boolean,
     haptic: Boolean = false,
+    size: androidx.compose.ui.unit.Dp = 40.dp,
     onClick: () -> Unit
 ) {
     val colors = LocalColors.current
@@ -780,7 +985,7 @@ private fun DockBtn(
     val bg by animateFloatAsState(if (active) 1f else 0f, Motion.segmented, label = "dockActive")
     Box(
         Modifier
-            .size(44.dp)
+            .size(size)
             .clip(Shapes2.M)
             .background(colors.accent.copy(alpha = 0.18f * bg))
             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
@@ -791,7 +996,7 @@ private fun DockBtn(
     ) {
         LIconView(
             icon,
-            size = 20.dp,
+            size = 19.dp,
             color = if (active) colors.accent else colors.text,
             strokeWidth = 1.7.dp
         )
@@ -811,6 +1016,7 @@ private fun ToolIsland(
     onUndo: () -> Unit,
     onClear: () -> Unit,
     onExport: () -> Unit,
+    onSignature: () -> Unit,
     onClose: () -> Unit
 ) {
     val colors = LocalColors.current
@@ -861,10 +1067,11 @@ private fun ToolIsland(
                 }
             }
             Spacer(Modifier.width(4.dp))
-            DockBtn(LIcon.Undo, "撤销", false, false, onUndo)
-            DockBtn(LIcon.Trash, "清空", false, false, onClear)
-            DockBtn(LIcon.Download, "导出标注", false, false, onExport)
-            DockBtn(LIcon.Xmark, "关闭", false, false, onClose)
+            DockBtn(LIcon.Signature, "签名", false, false, 36.dp, onSignature)
+            DockBtn(LIcon.Undo, "撤销", false, false, 36.dp, onUndo)
+            DockBtn(LIcon.Trash, "清空", false, false, 36.dp, onClear)
+            DockBtn(LIcon.Download, "导出标注", false, false, 36.dp, onExport)
+            DockBtn(LIcon.Xmark, "关闭", false, false, 36.dp, onClose)
         }
     }
 }
