@@ -83,6 +83,9 @@ fun LiquidGlass(
     val colors = LocalColors.current
     val source = backdrop ?: scope?.backdrop
     val density = LocalDensity.current
+    // 设备能力：AGSL 不可用时自动退化为模糊玻璃，而不是崩掉
+    val capability = LocalGlassCapability.current
+    val level = capability.level
 
     val refr = (refraction ?: spec.refraction) * if (pressed) 1.2f else 1f
     val blurDp = blur ?: spec.blurDp.dp
@@ -91,13 +94,32 @@ fun LiquidGlass(
     val base = Modifier
         .clip(shape)
         .then(
-            if (source != null) {
+            if (source != null && level != GlassLevel.PLAIN) {
                 Modifier.drawBackdrop(
                     backdrop = source,
                     shape = { shape },
                     effects = {
-                        lens(refr * 100f * spec.intensity, 24f * spec.intensity, true, false)
-                        blur(blurDp.toPx())
+                        // 三级降级：
+                        //  FULL      → lens（AGSL 折射）+ blur
+                        //  BLUR_ONLY → 跳过 lens，保留 blur/highlight
+                        //  PLAIN     → 不进入本分支
+                        // 每个效果单独 try/catch：某些 ROM 的 lens 会在 updateEffects
+                        // 里抛 UnsupportedOperationException，一旦冒到绘制循环就是闪退。
+                        if (level == GlassLevel.FULL) {
+                            runCatching {
+                                lens(refr * 100f * spec.intensity, 24f * spec.intensity, true, false)
+                            }.onFailure {
+                                capability.degrade()   // FULL → BLUR_ONLY
+                                GlassLog.warn("lens", it)
+                            }
+                        }
+                        if (level != GlassLevel.PLAIN) {
+                            runCatching { blur(blurDp.toPx()) }
+                                .onFailure {
+                                    capability.degrade()   // → PLAIN
+                                    GlassLog.warn("blur", it)
+                                }
+                        }
                     },
                     highlight = {
                         com.kyant.backdrop.highlight.Highlight(
@@ -113,7 +135,21 @@ fun LiquidGlass(
             }
         )
         // 玻璃本底
-        .drawBehind { drawRect(colors.glassBase) }
+        .drawBehind {
+            if (level == GlassLevel.PLAIN) {
+                // PLAIN：连 backdrop 都没有，只靠 6% 白的本底会糊成一团。
+                // 加深本底并加一层暗角，保证文字仍然可读（此时用户看到的是
+                // 「磨砂塑料」而不是「玻璃」，视觉降级但可用）。
+                drawRect(colors.glassBase.copy(alpha = (colors.glassBase.alpha + 0.55f).coerceAtMost(0.72f)))
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        listOf(Color.Black.copy(alpha = 0.06f), Color.Transparent)
+                    )
+                )
+            } else {
+                drawRect(colors.glassBase)
+            }
+        }
         .then(
             if (highlightColor != null) {
                 Modifier.drawBehind {

@@ -73,7 +73,15 @@ data class GlassSpec(
     /** 设置页"动效等级"为减弱/关闭时，动态形变被压平 */
     val motionScale: Float = 1f,
     /** 玻璃强度偏好（1.0 = 规范基准） */
-    val intensity: Float = 1f
+    val intensity: Float = 1f,
+    /**
+     * 是否允许 AGSL 折射（设备能力探测结果，非用户设置）。
+     *
+     * 这个值走 [GlassSpec] 而不是单独读 CompositionLocal，是为了让玻璃参数
+     * 只有一个数据源：一旦设备不支持折射，[intensity] 里就不含折射分量，
+     * 所有依赖它的计算（阴影、高光位移、边缘色散）自动保持一致。
+     */
+    val allowRefraction: Boolean = true
 )
 
 val LocalColors = staticCompositionLocalOf { LightColors }

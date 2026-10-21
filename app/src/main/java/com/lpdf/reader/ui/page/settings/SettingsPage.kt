@@ -46,6 +46,8 @@ import com.lpdf.reader.data.local.ReadingMode
 import com.lpdf.reader.data.local.SaveMode
 import com.lpdf.reader.data.local.ThemeMode
 import com.lpdf.reader.ui.glass.GlassDivider
+import com.lpdf.reader.ui.glass.GlassLevel
+import com.lpdf.reader.ui.glass.GlassLog
 import com.lpdf.reader.ui.glass.GlassGroup
 import com.lpdf.reader.ui.glass.GlassIconButton
 import com.lpdf.reader.ui.glass.GlassPillButton
@@ -58,6 +60,7 @@ import com.lpdf.reader.ui.glass.LIcon
 import com.lpdf.reader.ui.glass.LIconView
 import com.lpdf.reader.ui.glass.LiquidGlass
 import com.lpdf.reader.ui.glass.LiquidGlassScope
+import com.lpdf.reader.ui.glass.LocalGlassCapability
 import com.lpdf.reader.ui.glass.Shapes2
 import com.lpdf.reader.ui.theme.LSpace
 import com.lpdf.reader.ui.theme.LType
@@ -391,6 +394,21 @@ fun SettingsPage(
                         GlassDivider()
                         InfoRow("开源许可", "PDFium / Liquid Glass", LIcon.FilePlus) {
                             say("PDFium（BSD）、Kyant0/AndroidLiquidGlass（Apache-2.0）")
+                        }
+                        GlassDivider()
+                        // 玻璃渲染能力：设备不支持 AGSL 时会自动降级，
+                        // 把状态摆出来，用户反馈「玻璃不对」时一眼能看到原因
+                        val glass = LocalGlassCapability.current
+                        InfoRow(
+                            "玻璃渲染",
+                            when (glass.level) {
+                                GlassLevel.FULL -> "完整效果"
+                                GlassLevel.BLUR_ONLY -> "模糊降级"
+                                GlassLevel.PLAIN -> "基础降级"
+                            },
+                            LIcon.Sliders
+                        ) {
+                            say(GlassLog.diagnostic())
                         }
                         GlassDivider()
                         InfoRow("分享应用", "推荐给朋友", LIcon.Link) {
