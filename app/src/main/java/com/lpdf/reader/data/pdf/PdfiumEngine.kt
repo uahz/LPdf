@@ -119,12 +119,19 @@ object PdfiumEngine {
                 val core = core()
                 val doc = core.newDocument(pfd, password ?: "")
                 val page: PdfPage = doc.openPage(pageIndex)
-                val width = targetWidthPx.coerceIn(64, MAX_RENDER_WIDTH)
-                val w = page.getPageWidth(width)
-                val h = page.getPageHeight(width)
-                val bitmap = Bitmap.createBitmap(
-                    w.coerceAtLeast(1), h.coerceAtLeast(1), Bitmap.Config.ARGB_8888
-                )
+                val (w, h) = renderSize(page, targetWidthPx)
+                // 显存水位检查：createBitmap 成功不代表 drawBitmap 能过。
+                // RecordingCanvas 在把位图交给 GPU 时若超过硬件纹理上限会直接抛
+                // RuntimeException（v1.3.2 真机崩溃即此），这里提前拦掉。
+                if (!PdfLimits.fitsHardwareTexture(w, h)) {
+                    val err = PdfError.Unknown(
+                        "页面尺寸超出设备渲染上限（${w}×${h}），已跳过渲染"
+                    )
+                    page.close()
+                    core.closeDocument(doc)
+                    return@withLock PdfResult.Failure(err)
+                }
+                val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                 bitmap.eraseColor(Color.WHITE)
                 page.renderPageBitmap(bitmap, 0, 0, w, h, true)
                 page.close()
@@ -352,4 +359,108 @@ object PdfiumEngine {
     }
 
     const val MAX_RENDER_WIDTH = 2048
+}
+
+/**
+ * 页面渲染尺寸计算 —— 所有渲染路径的唯一入口。
+ *
+ * ## 为什么必须限死
+ *
+ * v1.3.2 真机（OnePlus PKG110 / Android 17）崩溃：
+ *
+ * ```
+ * RuntimeException: Canvas: trying to draw too large(527487968bytes) bitmap.
+ *   at RecordingCanvas.throwIfCannotDraw
+ * ```
+ *
+ * 5.27 亿字节 ≈ 5 亿像素（ARGB_8888 每像素 4 字节）。这不是我们主动建的图太大，
+ * 而是 PDF 页面**本身的尺寸**骇人 —— 常见于：
+ *
+ * - CAD / 工程图 / 地图导出的 PDF，单页 MediaBox 动辄上万点
+ * - 扫描件以 2000+ dpi 存储
+ * - PDF 内部把页面挂在极端缩放矩阵上
+ *
+ * 陷阱在于 `getPageHeight(width)` 的行为：它按**给定宽度缩放后**返回高度。
+ * 当页面长宽比极度悬殊（比如 1:400 的施工图），把宽度设为 1080px 后
+ * 高度会达到几十万像素，乘出来就是天文数字。原来只限制了宽度，
+ * 等于没有约束面积 —— `MAX_RENDER_WIDTH` 形同虚设。
+ *
+ * ## 策略
+ *
+ * 先按目标宽度算出比例，再按两条硬约束收敛：
+ *
+ * 1. `MAX_PIXELS`：总像素上限（约 4000 万，16MB 位图），保证任何情况下不会撑爆显存
+ * 2. `MAX_ASPECT`：长宽比上限（16:1），超过就说明是异形页面，
+ *    此时宁可让页面偏小也不让它变成一根针
+ *
+ * 收敛后重新算高度，并**再次**用像素上限兜一次 —— 因为 PDF 里可能存在
+ * 非等比缩放的页面矩阵，`w * h` 不一定等于预期的比例。
+ *
+ * @return (宽, 高)，均已保证 >= 1 且总面积 <= MAX_PIXELS
+ */
+internal fun renderSize(page: PdfPage, targetWidthPx: Int): Pair<Int, Int> {
+    val wantW = targetWidthPx.coerceIn(64, PdfiumEngine.MAX_RENDER_WIDTH)
+    var w = wantW
+    var h = page.getPageHeight(w)
+
+    // 页面句柄失效时 PDFium 返回 -1，此时退回 A4 比例占位，避免建出负尺寸位图
+    if (h <= 0) {
+        return w to (w * 1.4142f).toInt().coerceAtLeast(1)
+    }
+
+    // ① 长宽比约束：超长页面先缩宽度，让高度落回合理区间
+    val maxH = (w * PdfLimits.MAX_ASPECT).toInt()
+    if (h > maxH && maxH > 0) {
+        val shrink = maxH.toFloat() / h.toFloat()
+        w = (w * shrink).toInt().coerceAtLeast(64)
+        h = page.getPageHeight(w)
+        if (h <= 0) {
+            return w to (w * 1.4142f).toInt().coerceAtLeast(1)
+        }
+    }
+
+    // ② 像素总量约束：无论如何不得超过 MAX_PIXELS
+    val pixels = w.toLong() * h.toLong()
+    if (pixels > PdfLimits.MAX_PIXELS) {
+        val scale = kotlin.math.sqrt(PdfLimits.MAX_PIXELS.toDouble() / pixels.toDouble()).toFloat()
+        w = (w * scale).toInt().coerceAtLeast(48)
+        // 宽度变了高度必须重新问 PDFium，不能直接乘比例
+        val h2 = page.getPageHeight(w)
+        h = if (h2 > 0) h2 else (w * 1.4142f).toInt()
+    }
+
+    // ③ 最后兜底：极端页面矩阵下 ② 可能仍未收敛，此时直接截断高度
+    var safeH = h.coerceAtLeast(1)
+    val maxHByPixels = (PdfLimits.MAX_PIXELS / w.coerceAtLeast(1)).toInt().coerceAtLeast(1)
+    if (safeH > maxHByPixels) safeH = maxHByPixels
+
+    return w to safeH
+}
+
+/** 渲染硬约束（单位：像素） */
+object PdfLimits {
+    /** 单页位图总像素上限：4000 万 ≈ 160MB 位图，与 W^2 = 6324^2 相当 */
+    const val MAX_PIXELS = 40_000_000L
+
+    /** 长宽比上限：超过 16:1 的页面视为异形，缩宽度处理 */
+    const val MAX_ASPECT = 16f
+
+    /** 位图字节数上限（ARGB_8888 = 4 字节/像素） */
+    const val MAX_BITMAP_BYTES = MAX_PIXELS * 4L
+
+    /**
+     * GPU 单边纹理上限。
+     *
+     * 业界保底值 8192：几乎所有支持 Vulkan/GLES3 的设备都至少这么宽。
+     * 超出后 RecordingCanvas 会抛
+     * `trying to draw too large(Nbytes) bitmap`。
+     */
+    const val MAX_TEXTURE_EDGE = 8192
+
+    /** 位图单边上限，取纹理上限与像素上限的较小者 */
+    fun fitsHardwareTexture(w: Int, h: Int): Boolean {
+        if (w <= 0 || h <= 0) return false
+        if (w > MAX_TEXTURE_EDGE || h > MAX_TEXTURE_EDGE) return false
+        return w.toLong() * h.toLong() <= MAX_PIXELS
+    }
 }

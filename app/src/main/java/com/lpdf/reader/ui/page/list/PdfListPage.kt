@@ -331,13 +331,25 @@ fun PdfListPage(
             }
 
             // 底部玻璃 Dock
-            BottomDock(
-                bottomInset = bottomInset,
-                onPickFile = { pickFile.launch(arrayOf("application/pdf")) },
-                onPickTree = { pickTree.launch(null) },
-                onRescan = { vm.scan() },
-                count = state.treeCount
-            )
+            //
+            // 必须用 Box + align 贴底，不能只靠 padding(bottom)。
+            // 覆盖层的根节点实际是一个「按内容包裹」的坐标空间：
+            // 直接放一个 Row 进来，它会被排在 **顶部**，padding(bottom) 只是
+            // 在它下面撑出一段空白，看上去就是「底栏飞到了状态栏下面」
+            // （v1.3.3 真机截图）。
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
+            ) {
+                BottomDock(
+                    bottomInset = bottomInset,
+                    onPickFile = { pickFile.launch(arrayOf("application/pdf")) },
+                    onPickTree = { pickTree.launch(null) },
+                    onRescan = { vm.scan() },
+                    count = state.treeCount
+                )
+            }
 
             // 长按浮框
             longPressed?.let { item ->

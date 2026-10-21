@@ -292,8 +292,12 @@ fun LiquidGlassScope(
             content = { content() }
         )
         // ② 玻璃覆盖层：不录进 layer，因此采样到的是①的结果
+        // 同样要显式撑满 —— 否则 overlay 根节点按内容高度从顶部排布，
+        // 底部 Dock 会跑到屏幕上方（同 LiquidGlassHost 的说明）
         CompositionLocalProvider(LocalLiquidGlassScope provides state) {
-            overlay(state)
+            Box(Modifier.fillMaxSize()) {
+                overlay(state)
+            }
         }
     }
 }

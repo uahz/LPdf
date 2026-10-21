@@ -19,7 +19,6 @@ import androidx.navigation.navArgument
 import androidx.navigation.NavType
 import com.lpdf.reader.AppContainer
 import com.lpdf.reader.data.local.AppSettings
-import com.lpdf.reader.ui.glass.LiquidGlassHost
 import com.lpdf.reader.ui.glass.LocalGlassCapability
 import com.lpdf.reader.ui.glass.rememberGlassCapability
 import com.lpdf.reader.ui.page.list.PdfListPage
@@ -42,7 +41,8 @@ object Routes {
 /**
  * 应用根：主题 + 三页导航。
  *
- * 玻璃采样：每个页面自身是 [LiquidGlassHost]，保证玻璃只采样本页内容。
+ * 玻璃采样：每个页面自身是 [com.lpdf.reader.ui.glass.LiquidGlassScope]，
+ * 保证玻璃只采样本页内容。
  */
 @Composable
 fun LPdfApp(
