@@ -38,6 +38,28 @@ class LpdfApplication : Application() {
         // 早期版本这里是无保护的 launch，一次磁盘异常就会表现为「打开即闪退」。
         CoroutineScope(SupervisorJob() + AppDispatchers.io).launch {
             runCatching { container.linkImporter.cleanOldImports() }
+            runCatching { cleanTempDirs(this@LpdfApplication) }
+        }
+    }
+
+    /**
+     * 清理临时产物。
+     *
+     * 导出带标注的 PDF、工具箱的拆合/压缩，都会先写 `cacheDir` 下的中间文件。
+     * 进程被杀、导出失败、用户中途退出，这些文件都不会自己消失。
+     * 长期积累会吃掉几百 MB 空间，且在「存储」页里看不出来源。
+     *
+     * 只清我们自己的子目录，不碰 `cacheDir` 根（可能有系统或其他库的文件）。
+     */
+    private fun cleanTempDirs(context: Context) {
+        listOf("flat", "staging").forEach { name ->
+            val dir = java.io.File(context.cacheDir, name)
+            if (!dir.exists()) return@forEach
+            dir.listFiles()?.forEach { f ->
+                // 超过 1 小时的中间产物一定是残留：正常流程不会占用这么久
+                val stale = System.currentTimeMillis() - f.lastModified() > 60 * 60 * 1000L
+                if (stale) runCatching { f.deleteRecursively() }
+            }
         }
     }
 }

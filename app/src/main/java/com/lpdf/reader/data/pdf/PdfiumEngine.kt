@@ -71,13 +71,13 @@ object PdfiumEngine {
     ): PdfResult<Int> = withContext(Dispatchers.IO) {
         MUTEX.withLock {
             var pfd: ParcelFileDescriptor? = null
+            var doc: PdfDocument? = null
             try {
                 pfd = resolver.openFileDescriptor(uri, "r")
                     ?: return@withLock PdfResult.Failure(PdfError.NotFound())
                 val core = core()
-                val doc = core.newDocument(pfd, password ?: "")
+                doc = core.newDocument(pfd, password ?: "")
                 val count: Int = doc.getPageCount().toInt()
-                core.closeDocument(doc)
                 if (count <= 0) {
                     PdfResult.Failure(PdfError.Corrupted("文档没有可读页面"))
                 } else {
@@ -94,6 +94,9 @@ object PdfiumEngine {
                     else -> PdfResult.Failure(PdfError.Corrupted())
                 }
             } finally {
+                // 原来这里只在成功路径 closeDocument：getPageCount 抛异常
+                // （损坏文档很常见）时 native 文档就泄漏了。
+                runCatching { doc?.let { core().closeDocument(it) } }
                 runCatching { pfd?.close() }
             }
         }
@@ -113,35 +116,37 @@ object PdfiumEngine {
     ): PdfResult<Bitmap> = withContext(Dispatchers.IO) {
         MUTEX.withLock {
             var pfd: ParcelFileDescriptor? = null
+            var doc: PdfDocument? = null
+            var page: PdfPage? = null
             try {
                 pfd = resolver.openFileDescriptor(uri, "r")
                     ?: return@withLock PdfResult.Failure(PdfError.NotFound())
                 val core = core()
-                val doc = core.newDocument(pfd, password ?: "")
-                val page: PdfPage = doc.openPage(pageIndex)
+                doc = core.newDocument(pfd, password ?: "")
+                page = doc.openPage(pageIndex)
                 val (w, h) = renderSize(page, targetWidthPx)
                 // 显存水位检查：createBitmap 成功不代表 drawBitmap 能过。
                 // RecordingCanvas 在把位图交给 GPU 时若超过硬件纹理上限会直接抛
                 // RuntimeException（v1.3.2 真机崩溃即此），这里提前拦掉。
                 if (!PdfLimits.fitsHardwareTexture(w, h)) {
-                    val err = PdfError.Unknown(
-                        "页面尺寸超出设备渲染上限（${w}×${h}），已跳过渲染"
+                    return@withLock PdfResult.Failure(
+                        PdfError.Unknown("页面尺寸超出设备渲染上限（${w}×${h}），已跳过渲染")
                     )
-                    page.close()
-                    core.closeDocument(doc)
-                    return@withLock PdfResult.Failure(err)
                 }
                 val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                 bitmap.eraseColor(Color.WHITE)
                 page.renderPageBitmap(bitmap, 0, 0, w, h, true)
-                page.close()
-                core.closeDocument(doc)
                 PdfResult.Success(bitmap)
             } catch (e: SecurityException) {
                 PdfResult.Failure(PdfError.PermissionDenied())
             } catch (t: Throwable) {
                 PdfResult.Failure(PdfError.Unknown("页面渲染失败", t))
             } finally {
+                // 顺序不能反：先关 page 再关 doc。
+                // 原来只在成功路径上 close，一旦 renderPageBitmap 抛异常，
+                // native 文档就永久泄漏 —— 反复打开损坏 PDF 会把内存吃满。
+                runCatching { page?.close() }
+                runCatching { doc?.let { core().closeDocument(it) } }
                 runCatching { pfd?.close() }
             }
         }
@@ -154,11 +159,12 @@ object PdfiumEngine {
         withContext(Dispatchers.IO) {
             MUTEX.withLock {
                 var pfd: ParcelFileDescriptor? = null
+                var doc: PdfDocument? = null
                 try {
                     pfd = resolver.openFileDescriptor(uri, "r")
                         ?: return@withLock PdfResult.Success(emptyList())
                     val core = core()
-                    val doc = core.newDocument(pfd)
+                    doc = core.newDocument(pfd)
                     val flat = mutableListOf<TocEntry>()
                     fun walk(items: List<PdfDocument.Bookmark>, depth: Int) {
                         items.forEach { b ->
@@ -167,11 +173,11 @@ object PdfiumEngine {
                         }
                     }
                     walk(core.getTableOfContents(doc) ?: emptyList(), 0)
-                    core.closeDocument(doc)
                     PdfResult.Success(flat)
                 } catch (t: Throwable) {
                     PdfResult.Success(emptyList())
                 } finally {
+                    runCatching { doc?.let { core().closeDocument(it) } }
                     runCatching { pfd?.close() }
                 }
             }
@@ -187,23 +193,26 @@ object PdfiumEngine {
     ): PdfResult<PageSize> = withContext(Dispatchers.IO) {
         MUTEX.withLock {
             var pfd: ParcelFileDescriptor? = null
+            var doc: PdfDocument? = null
+            var pg: PdfPage? = null
             try {
                 pfd = resolver.openFileDescriptor(uri, "r")
                     ?: return@withLock PdfResult.Failure(PdfError.NotFound())
                 val core = core()
-                val doc = core.newDocument(pfd)
-                val page = doc.openPage(pageIndex)
-                val size = PageSize(
-                    widthPt = page.getPageWidthPoint().toFloat(),
-                    heightPt = page.getPageHeightPoint().toFloat(),
-                    rotation = page.getPageRotation()
+                doc = core.newDocument(pfd)
+                pg = doc.openPage(pageIndex)
+                PdfResult.Success(
+                    PageSize(
+                        widthPt = pg.getPageWidthPoint().toFloat(),
+                        heightPt = pg.getPageHeightPoint().toFloat(),
+                        rotation = pg.getPageRotation()
+                    )
                 )
-                page.close()
-                core.closeDocument(doc)
-                PdfResult.Success(size)
             } catch (t: Throwable) {
                 PdfResult.Failure(PdfError.Unknown("读取页面尺寸失败", t))
             } finally {
+                runCatching { pg?.close() }
+                runCatching { doc?.let { core().closeDocument(it) } }
                 runCatching { pfd?.close() }
             }
         }
@@ -221,17 +230,18 @@ object PdfiumEngine {
         withContext(Dispatchers.IO) {
             MUTEX.withLock {
                 var pfd: ParcelFileDescriptor? = null
+                var doc: PdfDocument? = null
                 try {
                     pfd = resolver.openFileDescriptor(uri, "r")
                         ?: return@withLock PdfResult.Failure(PdfError.NotFound())
                     val core = core()
-                    val doc = core.newDocument(pfd)
+                    doc = core.newDocument(pfd)
                     val m = doc.getDocumentMeta()
-                    core.closeDocument(doc)
                     PdfResult.Success(Meta(m.title, m.author, m.subject, m.keywords))
                 } catch (t: Throwable) {
                     PdfResult.Failure(PdfError.Unknown("读取元数据失败", t))
                 } finally {
+                    runCatching { doc?.let { core().closeDocument(it) } }
                     runCatching { pfd?.close() }
                 }
             }
@@ -271,13 +281,14 @@ object PdfiumEngine {
 
         MUTEX.withLock {
             var pfd: ParcelFileDescriptor? = null
+            var doc: PdfDocument? = null
             var textPage: PdfTextPage? = null
             var find: FindResult? = null
             try {
                 pfd = resolver.openFileDescriptor(uri, "r")
                     ?: return@withLock PdfResult.Failure(PdfError.NotFound())
                 val core = core()
-                val doc = core.newDocument(pfd, password ?: "")
+                doc = core.newDocument(pfd, password ?: "")
                 val total: Int = doc.getPageCount().toInt()
                 val hits = mutableListOf<SearchHit>()
                 val flags = if (matchCase) setOf(FindFlags.MatchCase) else emptySet()
@@ -286,64 +297,75 @@ object PdfiumEngine {
                     if (hits.size >= maxResults) break
                     onProgress(p, total)
 
-                    val page = doc.openPage(p)
-                    // 页面点位尺寸，用于把 char box 归一化
-                    val pageW = page.getPageWidthPoint().toFloat().coerceAtLeast(1f)
-                    val pageH = page.getPageHeightPoint().toFloat().coerceAtLeast(1f)
-                    val tp = page.openTextPage()
-                    textPage = tp
+                    // 单页失败不能拖垮整次搜索：损坏页 openPage/openTextPage 会抛，
+                    // 原来的写法会让异常直接跳到 finally，当前页的 page/textPage
+                    // 没被关掉 —— native 内存越搜越涨。这里单页兜住并 continue。
+                    var page: PdfPage? = null
+                    var tp: PdfTextPage? = null
+                    try {
+                        page = doc.openPage(p)
+                        // 页面点位尺寸，用于把 char box 归一化
+                        val pageW = page.getPageWidthPoint().toFloat().coerceAtLeast(1f)
+                        val pageH = page.getPageHeightPoint().toFloat().coerceAtLeast(1f)
+                        tp = page.openTextPage()
+                        textPage = tp
 
-                    var start = 0
-                    var guard = 0
-                    while (hits.size < maxResults && guard++ < 500) {
-                        val fr = tp.findStart(query, flags, start) ?: break
-                        find = fr
-                        val idx = fr.getSchResultIndex()
-                        val count = fr.getSchCount()
-                        if (idx < 0) break
+                        var start = 0
+                        var guard = 0
+                        while (hits.size < maxResults && guard++ < 500) {
+                            val fr = tp.findStart(query, flags, start) ?: break
+                            find = fr
+                            val idx = fr.getSchResultIndex()
+                            val count = fr.getSchCount()
+                            if (idx < 0) break
 
-                        // 该匹配覆盖的矩形（通常 1~2 个）
-                        val rects = buildList {
-                            val n = tp.textPageCountRects(idx, idx + count)
-                            val maxRects = n.coerceAtMost(8)
-                            for (k in 0 until maxRects) {
-                                val r = tp.textPageGetRect(k)
-                                if (r != null && r.width() > 0f && r.height() > 0f) {
-                                    add(
-                                        AnnotRectLike(
-                                            left = (r.left / pageW).coerceIn(0f, 1f),
-                                            top = (r.top / pageH).coerceIn(0f, 1f),
-                                            right = (r.right / pageW).coerceIn(0f, 1f),
-                                            bottom = (r.bottom / pageH).coerceIn(0f, 1f)
+                            // 该匹配覆盖的矩形（通常 1~2 个）
+                            val rects = buildList {
+                                val n = tp.textPageCountRects(idx, idx + count)
+                                val maxRects = n.coerceAtMost(8)
+                                for (k in 0 until maxRects) {
+                                    val r = tp.textPageGetRect(k)
+                                    if (r != null && r.width() > 0f && r.height() > 0f) {
+                                        add(
+                                            AnnotRectLike(
+                                                left = (r.left / pageW).coerceIn(0f, 1f),
+                                                top = (r.top / pageH).coerceIn(0f, 1f),
+                                                right = (r.right / pageW).coerceIn(0f, 1f),
+                                                bottom = (r.bottom / pageH).coerceIn(0f, 1f)
+                                            )
                                         )
-                                    )
+                                    }
                                 }
                             }
+
+                            val snippet = runCatching {
+                                val totalChars = tp.textPageCountChars()
+                                val from = (idx - 20).coerceAtLeast(0)
+                                val to = (idx + count + 30).coerceAtMost(totalChars)
+                                val raw = tp.textPageGetText(from, to - from) ?: ""
+                                raw.replace(Regex("\\s+"), " ").trim()
+                            }.getOrElse { "" }
+
+                            hits += SearchHit(p, snippet.ifBlank { query }, rects, idx)
+                            fr.closeFind()
+                            find = null
+                            start = idx + count
+                            if (start <= idx) break
                         }
-
-                        val snippet = runCatching {
-                            val totalChars = tp.textPageCountChars()
-                            val from = (idx - 20).coerceAtLeast(0)
-                            val to = (idx + count + 30).coerceAtMost(totalChars)
-                            val raw = tp.textPageGetText(from, to - from) ?: ""
-                            raw.replace(Regex("\\s+"), " ").trim()
-                        }.getOrElse { "" }
-
-                        hits += SearchHit(p, snippet.ifBlank { query }, rects, idx)
-                        fr.closeFind()
+                    } catch (t: Throwable) {
+                        // 单页解析失败：跳过该页，保留已找到的结果
+                        if (t is SecurityException) throw t
+                    } finally {
+                        textPage = null
+                        runCatching { find?.closeFind() }
                         find = null
-                        start = idx + count
-                        if (start <= idx) break
+                        runCatching { tp?.close() }
+                        runCatching { page?.close() }
                     }
-
-                    textPage = null
-                    runCatching { tp.close() }
-                    runCatching { page.close() }
                 }
 
                 runCatching { find?.closeFind() }
                 runCatching { textPage?.close() }
-                core.closeDocument(doc)
                 onProgress(total, total)
                 PdfResult.Success(hits)
             } catch (e: SecurityException) {
@@ -353,6 +375,7 @@ object PdfiumEngine {
             } finally {
                 runCatching { find?.closeFind() }
                 runCatching { textPage?.close() }
+                runCatching { doc?.let { core().closeDocument(it) } }
                 runCatching { pfd?.close() }
             }
         }

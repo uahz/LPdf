@@ -48,11 +48,11 @@ fun LocalThumbnail(
 ) {
     val colors = LocalColors.current
     val shape = RoundedCornerShape(corner)
-    val bitmap: ImageBitmap? = remember(path) {
-        if (path == null) null
-        else runCatching {
-            BitmapFactory.decodeFile(path)?.asImageBitmap()
-        }.getOrNull()
+    // 走有界缓存，不用 remember(path)：
+    // LazyColumn 滚过的项会被回收，但 remember 出来的 ImageBitmap 要等 GC
+    // 才释放，滚动几百项就攒出几十 MB。缓存按条目数 + 字节双限淘汰。
+    val bitmap: ImageBitmap? = path?.let {
+        remember(it) { ThumbnailCache.get(it) }
     }
     Box(
         modifier

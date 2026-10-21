@@ -177,15 +177,20 @@ object PdfWriterEngine {
                                 // 底图：按页宽 2 倍渲染，上限 1600 防 OOM
                                 val bmpW = (wPt * 2).coerceIn(160, 1600)
                                 val bmpH = (bmpW.toFloat() * hPt / wPt).toInt().coerceAtLeast(1)
+                                // render / drawBitmap 抛异常时原来不会走到 bmp.recycle()，
+                                // 长文档中途失败就漏掉一张几千像素宽的位图。
                                 val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
-                                bmp.eraseColor(Color.WHITE)
-                                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                                canvas.drawBitmap(
-                                    bmp, null,
-                                    android.graphics.RectF(0f, 0f, wPt.toFloat(), hPt.toFloat()),
-                                    Paint(Paint.FILTER_BITMAP_FLAG)
-                                )
-                                bmp.recycle()
+                                try {
+                                    bmp.eraseColor(Color.WHITE)
+                                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                    canvas.drawBitmap(
+                                        bmp, null,
+                                        android.graphics.RectF(0f, 0f, wPt.toFloat(), hPt.toFloat()),
+                                        Paint(Paint.FILTER_BITMAP_FLAG)
+                                    )
+                                } finally {
+                                    runCatching { bmp.recycle() }
+                                }
 
                                 // 水印：仅在指定页码范围
                                 if (pageRange == null || pageRange.contains(i)) {

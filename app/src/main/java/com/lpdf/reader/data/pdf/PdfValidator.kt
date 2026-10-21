@@ -45,6 +45,11 @@ class PdfValidator(private val resolver: ContentResolver) {
             PdfResult.Success(Probe(magicOk, hasEof, encrypted))
         } catch (e: SecurityException) {
             PdfResult.Failure(PdfError.PermissionDenied())
+        } catch (e: java.io.FileNotFoundException) {
+            // SAF 授权被撤销 / 文件被移走后 openInputStream 会抛 FileNotFoundException，
+            // 归到 Unknown 的话列表页只能给出「无法打开该文件」，
+            // 用户没有任何自救入口。
+            PdfResult.Failure(PdfError.NotFound())
         } catch (t: Throwable) {
             PdfResult.Failure(PdfError.Unknown(cause = t))
         }
@@ -76,8 +81,8 @@ class PdfValidator(private val resolver: ContentResolver) {
 
     private fun readHead(uri: Uri, len: Int): ByteArray {
         resolver.openInputStream(uri)?.use { return it.readAtMost(len) }
-        val f = uri.path?.let { File(it) } ?: return ByteArray(0)
-        if (!f.exists()) throw IllegalStateException("文件不存在")
+        val f = uri.path?.let { File(it) } ?: throw java.io.FileNotFoundException("无法定位文件: $uri")
+        if (!f.exists()) throw java.io.FileNotFoundException("文件不存在: $f")
         return FileInputStream(f).use { it.readAtMost(len) }
     }
 
@@ -104,7 +109,7 @@ class PdfValidator(private val resolver: ContentResolver) {
                 }
             }
         }
-        val input = resolver.openInputStream(uri) ?: throw IllegalStateException("文件不存在")
+        val input = resolver.openInputStream(uri) ?: throw java.io.FileNotFoundException("无法打开: $uri")
         return input.use {
             var remaining = it.available().toLong() - len
             if (remaining > 0) {

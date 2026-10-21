@@ -71,7 +71,7 @@ data class ReaderUiState(
  * 阅读页逻辑。
  *
  * 性能约定：
- * - 页面位图按页懒加载，LRU 上限 [CACHE_LIMIT] 页
+ * - 页面位图按页懒加载，LRU 上限 [CACHE_LIMIT] 页 **且** 总字节不超过 [CACHE_MAX_BYTES]
  * - 渲染请求串行（PDFium 非线程安全），只渲染当前可见 + 前后各 1 页
  * - 切页保存进度走 DataStore（防抖 800ms）
  */
@@ -80,14 +80,59 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
     private val _state = MutableStateFlow(ReaderUiState())
     val state: StateFlow<ReaderUiState> = _state.asStateFlow()
 
-    /** 已渲染页缓存：pageIndex -> Bitmap */
+    /**
+     * 已渲染页缓存：pageIndex -> Bitmap。
+     *
+     * 淘汰按「页数」和「字节数」双条件。
+     *
+     * v1.3.3 之前只看页数（7 页）。一旦遇到大幅面页面（A3 图纸、
+     * 2000dpi 扫描件），单页位图可达 30~160MB，7 页就是 1GB+，
+     * 表现是「翻几页就闪退」或整机卡死。
+     *
+     * 字节上限取 heap 的 1/4：既给 Bitmap 留足空间，又不至于把
+     * 应用逼到 GC 抖动的边缘。
+     */
     private val pageCache = object : LinkedHashMap<Int, android.graphics.Bitmap>(8, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, android.graphics.Bitmap>?): Boolean {
-            if (size > CACHE_LIMIT) {
+            if (size <= 1) return false
+            val overCount = size > CACHE_LIMIT
+            val overBytes = cachedBytes > CACHE_MAX_BYTES
+            if (overCount || overBytes) {
                 eldest?.value?.recycle()
+                cachedBytes -= eldest?.value?.allocationByteCount?.toLong() ?: 0L
                 return true
             }
             return false
+        }
+    }
+
+    /** pageCache 当前占用字节数（随插入/淘汰维护，避免每次遍历求和） */
+    private var cachedBytes = 0L
+
+    /** 单次可用的位图缓存预算：堆的 1/4，下限 32MB 上限 192MB */
+    private val CACHE_MAX_BYTES: Long = run {
+        val heap = Runtime.getRuntime().maxMemory()
+        (heap / 4).coerceIn(32L * 1024 * 1024, 192L * 1024 * 1024)
+    }
+
+    /** 插入缓存并维护字节计数 */
+    private fun putPage(page: Int, bmp: android.graphics.Bitmap) {
+        synchronized(pageCache) {
+            pageCache.remove(page)?.let {
+                cachedBytes -= it.allocationByteCount.toLong()
+                it.recycle()
+            }
+            pageCache[page] = bmp
+            cachedBytes += bmp.allocationByteCount.toLong()
+        }
+    }
+
+    /** 清空缓存并回收全部位图（切换文档时调用） */
+    private fun clearPageCache() {
+        synchronized(pageCache) {
+            pageCache.values.forEach { runCatching { it.recycle() } }
+            pageCache.clear()
+            cachedBytes = 0L
         }
     }
 
@@ -98,8 +143,24 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
     private var saveJob: Job? = null
     private var progressJob: Job? = null
 
+    /**
+     * 打开文档的协程。
+     *
+     * 原来 `open()` 直接 `viewModelScope.launch` 就没人管了：连续点两个文档时，
+     * 两次打开并发跑，谁后返回谁写 state —— 后点开的那个反而可能被先点开的覆盖，
+     * 出现「点了 A 却显示 B」。现在新一次 `bind()` 先取消上一次。
+     */
+    private var openJob: Job? = null
+
     fun bind(uriString: String, displayName: String, lastModified: Long, password: String?) {
         if (docKey.isNotEmpty() && this.uri.toString() == uriString) return
+        // 上一个文档的打开流程还没结束时必须掐掉，否则它晚一步返回会把
+        // state 覆盖成旧文档的页数/目录。
+        openJob?.cancel()
+        // 换了文档：上一个文档的位图必须全部释放。
+        // 原来这里不清，缓存里留着旧页，既浪费内存又可能在新文档里
+        // 命中旧页号而显示成别的文档内容。
+        clearPageCache()
         this.uri = Uri.parse(uriString)
         this.password = password
         this.docKey = container.annotations.keyOf(uriString, lastModified)
@@ -108,13 +169,18 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
             displayName = displayName,
             loading = true,
             error = null,
-            pageCount = 0
+            pageCount = 0,
+            currentPage = 0,
+            toc = emptyList(),
+            bookmarks = emptyList(),
+            currentPageBookmarked = false,
+            annotationCount = 0
         )
         open(displayName)
     }
 
     private fun open(displayName: String) {
-        viewModelScope.launch {
+        openJob = viewModelScope.launch {
             val countRes = PdfiumEngine.pageCount(container.resolver(), uri, password)
             when (countRes) {
                 is PdfResult.Failure -> _state.value = _state.value.copy(
@@ -156,7 +222,7 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
         val res = PdfiumEngine.renderPage(container.resolver(), uri, page, widthPx, password)
         val bmp = res.getOrNull() ?: return
         withContext(AppDispatchers.main) {
-            synchronized(pageCache) { pageCache[page] = bmp }
+            putPage(page, bmp)
             // 触发重组
             _state.value = _state.value.copy(zoom = _state.value.zoom)
         }
@@ -277,6 +343,9 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
             when (res) {
                 is PdfResult.Failure -> {
+                    // 失败时临时文件同样要删。原来只删成功分支，
+                    // 反复导出失败会在 cache 里堆一批几十 MB 的 PDF。
+                    runCatching { tmp.delete() }
                     _exportProgress.value = null
                     toast(res.error.message ?: "导出失败")
                 }
@@ -290,7 +359,7 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
                             } ?: throw java.io.IOException("无法写入目标位置")
                         }
                     }
-                    res.value.delete()
+                    runCatching { res.value.delete() }
                     _exportProgress.value = null
                     if (copied.isSuccess) {
                         toast("已导出带标注的 PDF（${doc.count()} 处标注）")
@@ -594,10 +663,7 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
     override fun onCleared() {
         flush()
-        synchronized(pageCache) {
-            pageCache.values.forEach { it.recycle() }
-            pageCache.clear()
-        }
+        clearPageCache()
         super.onCleared()
     }
 

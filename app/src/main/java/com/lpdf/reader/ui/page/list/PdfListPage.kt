@@ -139,14 +139,21 @@ fun PdfListPage(
 
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            runCatching {
-                container.resolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
+            // 持久化失败的提示交给 ListViewModel.importFromUri 统一处理，
+            // 那里知道 uri 是否真的拿到了长期授权，可以写进 PdfItem。
             vm.importFromUri(uri) { item, _ -> onOpenReader(item.uri, item.displayName) }
         }
     }
     val pickTree = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) vm.addTree(uri)
+    }
+
+    // 条目授权失效时，玻璃提示条上的「重新选择」把用户送回系统选择器
+    LaunchedEffect(state.reselectRequest) {
+        if (state.reselectRequest) {
+            vm.consumeReselect()
+            runCatching { pickFile.launch(arrayOf("application/pdf")) }
+        }
     }
 
     LaunchedEffect(Unit) {

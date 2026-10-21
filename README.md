@@ -1,4 +1,4 @@
-# LPdf 1.3.2 · Android PDF 阅读器
+# LPdf 1.3.4 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.3.2-release.apk
+adb install -r dist/LPdf-1.3.4-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -27,7 +27,7 @@ export JAVA_HOME=/opt/jdk21
 export ANDROID_HOME=/opt/android-sdk
 ./gradlew :app:assembleRelease       # 产物 app/build/outputs/apk/release/
 ./gradlew :app:assembleDebug         # 仅供本地调试，不发布
-./gradlew :app:testDebugUnitTest     # 59 个单测
+./gradlew :app:testDebugUnitTest     # 87 个单测
 ```
 
 **签名配置**：`keystore.properties` 与 `keystore/` 均不入库。首次构建若无这两者，
@@ -35,6 +35,25 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.3.4 变更
+
+这一版没有新功能，只做**体检**：把那些「不崩溃、不报错，但会悄悄吃内存、
+或者让文件点不开又说不出原因」的问题一次性清掉。
+
+| 类型 | 内容 |
+|---|---|
+| **修复** | **PDFium native 句柄泄漏（7 处）**：`pageCount` / `renderPage` / `tableOfContents` / `pageSize` / `metadata` / `search` 原来只在成功路径 `closeDocument`，`getPageCount()`、`renderPageBitmap()` 等抛异常时 native 文档永不释放。反复打开损坏 PDF 会把 native 内存吃满直到进程被杀。全部改为 `doc` / `page` 提到 try 外、`finally` 统一释放 |
+| **修复** | **搜索循环内的单页泄漏**：`doc.openPage(p)` / `page.openTextPage()` 是 native 调用，损坏页会抛异常直接跳到 `finally`，当前页的 `PdfPage` / `PdfTextPage` 没被关。改为单页 try/finally 兜住并 `continue`，一页坏了不再拖垮整次搜索 |
+| **修复** | **位图缓存只看页数不看字节**：`pageCache` 原来限 5 页，但 A4@2048px 一页就 16MB，5 页 80MB，低端机直接 OOM。改为 LRU 双限：页数 **+** 字节（堆的 1/4，32MB–192MB 自适应） |
+| **修复** | **切换文档不清页缓存**：`bind()` 换文档时旧页位图仍留在缓存里，既浪费内存，还可能在新文档里命中旧页号显示成别的内容。现在 `bind()` 开头 `clearPageCache()` 并重置 `currentPage` / `toc` / `bookmarks` |
+| **修复** | **打开文档的竞态**：连续点两个文档时两次 `open()` 并发跑，谁后返回谁写 state —— 后点开的反而可能被先点开的覆盖（点了 A 显示 B）。新增 `openJob`，新一次 `bind()` 先取消上一次 |
+| **修复** | **列表缩略图累积**：原来 `remember(path) { decodeFile(...) }`，`LazyColumn` 滚过的项要等 GC 才释放，滚几百个文档就攒几十 MB。新增 `ThumbnailCache`：LRU，120 条 / 24MB 双限 |
+| **修复** | **授权失效后无法自救**：`takePersistableUriPermission` 的异常被 `runCatching` 静默吞掉，SAF 授权被撤销或文件被移走时列表只给一句「无法打开该文件」。现在 `FileNotFoundException` 归到 `NotFound`，玻璃提示条给出「**重新选择**」按钮直接拉起系统选择器 |
+| **修复** | **导入时的持久化失败被吞**：`PdfItem.persistedUriPermission` 原来硬编码 `true`，现在按真实结果写入；目录授权失败也会提示「重启后可能需要重新选择」 |
+| **修复** | **导出失败不清理临时文件** / **启动不清理陈旧缓存**：`cacheDir/flat`、`cacheDir/staging` 遗留文件现在启动时清理超过 1 小时的残留 |
+| **修复** | **水印合成的位图泄漏**：`PdfWriterEngine` 循环内 `render` / `drawBitmap` 抛异常时 `bmp.recycle()` 走不到，长文档中途失败会漏掉一张几千万像素的位图。改为 try/finally |
+| **测试** | 新增 15 项：`ThumbnailCacheTest`(8) 覆盖 LRU 命中/淘汰/字节上限/非法文件，`PdfResourceSafetyTest`(7) 覆盖失效授权归类与渲染尺寸闸门。总计 **87 项全绿**，并对 `NotFound` 修复做了反向验证（撤掉修复 → 2 项失败） |
 
 ## 1.3.2 变更
 
@@ -115,7 +134,7 @@ app/src/main/java/com/lpdf/reader/
 
 ## 已知限制
 
-- **未在真机 / 模拟器验证**：构建环境无 KVM，Android 模拟器无法启动。已验证的是：编译通过、R8 通过、26 个 JVM 测试通过（含标注坐标 JSON 往返、扁平化坐标换算、水印几何计算）。**玻璃的 AGSL 折射效果只能在真机上看，请实际安装确认。**
+- **未在真机 / 模拟器验证**：构建环境无 KVM，Android 模拟器无法启动。已验证的是：编译通过、R8 通过、87 个 JVM 测试通过（含标注坐标 JSON 往返、扁平化坐标换算、水印几何计算）。**玻璃的 AGSL 折射效果只能在真机上看，请实际安装确认。**
 - **标注导出未做端到端验证**：依赖 PDFium native so 与 PdfDocument 写入，JVM 侧只能覆盖坐标换算，实际导出结果需真机确认。
 - **形状只画矩形**：`Annotation.Shape.kind` 支持 `RECT`/`OVAL`/`ARROW`，但阅读页只渲染 RECT，导出同步了这一行为。
 - **表单填写 / 元数据编辑**：引擎与数据模型已具备，UI 尚未接入，属 v2.0 范围。

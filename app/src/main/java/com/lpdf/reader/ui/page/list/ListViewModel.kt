@@ -46,7 +46,9 @@ data class ListUiState(
     /** id -> 缩略图文件绝对路径（异步补齐，用于列表渲染） */
     val thumbs: Map<String, String> = emptyMap(),
     /** 已授权目录数量 */
-    val treeCount: Int = 0
+    val treeCount: Int = 0,
+    /** 请求列表页弹出系统文件选择器（权限失效后让用户重新挑文件） */
+    val reselectRequest: Boolean = false
 ) {
     val visibleItems: List<PdfItem>
         get() {
@@ -244,6 +246,16 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
                     is PdfError.PermissionDenied ->
                         _state.value = _state.value.copy(permissionDenied = true)
 
+                    is PdfError.NotFound -> {
+                        // 授权已失效（重启 / 清数据 / 文件被移走）。给出「重新选择文件」
+                        // 的入口，而不是让用户对着灰掉的行发呆。
+                        markBroken(item)
+                        toast(
+                            "「${item.displayName}」访问权限已失效",
+                            actionLabel = "重新选择"
+                        ) { _state.value = _state.value.copy(reselectRequest = true) }
+                    }
+
                     else -> {
                         markBroken(item)
                         toast(err.message ?: "无法打开该文件")
@@ -341,7 +353,7 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
 
     fun addTree(uri: Uri) {
         viewModelScope.launch {
-            runCatching {
+            val persisted = runCatching {
                 container.resolver().takePersistableUriPermission(
                     uri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
@@ -349,6 +361,11 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
             }
             container.prefs.addSafTree(uri.toString())
             scan()
+            // 持久化失败时目录只在本次进程有效，重启后条目全部变成「无法打开」。
+            // 原来这里静默吞掉，用户只会觉得「昨天还能开的书今天打不开了」。
+            if (persisted.isFailure) {
+                toast("该目录未授予长期访问权限，重启后可能需要重新选择")
+            }
         }
     }
 
@@ -357,6 +374,12 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             _state.value = _state.value.copy(progressText = "正在读取文件…")
             val name = container.mediaStore.displayNameOf(uri) ?: "导入文档.pdf"
+            // 先把读取权限变成长久授权，否则下次启动列表里躺着一个点不开的条目。
+            // 某些来源（如其它 App 的 content provider）本身不支持持久化，
+            // 这时不该拦住用户，只是记录下来并在打开失败时给出可操作的提示。
+            val persisted = runCatching {
+                container.resolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }.isSuccess
             val item = PdfItem(
                 id = uri.toString(),
                 uri = uri.toString(),
@@ -364,7 +387,7 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
                 sizeBytes = container.mediaStore.sizeOf(uri),
                 lastModified = System.currentTimeMillis(),
                 source = PdfSource.SAF_DIR,
-                persistedUriPermission = true
+                persistedUriPermission = persisted
             )
             _state.value = _state.value.copy(
                 progressText = null,
@@ -418,6 +441,13 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
 
     fun dismissToast() {
         _state.value = _state.value.copy(toast = null)
+    }
+
+    /** 列表页消费掉「重新选择文件」请求，避免重组时反复弹选择器 */
+    fun consumeReselect() {
+        if (_state.value.reselectRequest) {
+            _state.value = _state.value.copy(reselectRequest = false)
+        }
     }
 
     private fun sortList(list: List<PdfItem>, order: SortOrder = _state.value.sortOrder): List<PdfItem> {
