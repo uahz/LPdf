@@ -295,7 +295,16 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
      */
     suspend fun ensureRendered(page: Int, widthPx: Int) {
         if (page < 0 || page >= _state.value.pageCount) return
-        synchronized(pageCache) { if (pageCache[page]?.isComplete == true) return }
+        // 目标宽度归一化：渲染宽上限之内的请求才算「同一张图」。
+        // v1.5.1：渲染宽度改为实测内容区宽度后，它会随窗口尺寸/旋转/分屏变化。
+        // 如果沿用「已完整就 return」，用户横屏或拉伸窗口后页面仍是旧的低分辨率
+        // 版本 —— 看着糊，却再也刷不新。这里把已渲染宽度一并纳入判断。
+        val wanted = widthPx.coerceIn(64, PdfiumEngine.MAX_RENDER_WIDTH)
+        synchronized(pageCache) {
+            val cached = pageCache[page]
+            // 宽度差 < 10% 视为等效，避免窗口微抖动时反复重渲
+            if (cached?.isComplete == true && cached.widthPx >= (wanted * 0.9f).toInt()) return
+        }
         // 已经失败过的页不要反复重试：PDFium 对同一页的失败是确定性的，
         // 重试只会白白占着渲染锁，让其它页排不上队。
         synchronized(renderErrors) { if (renderErrors.containsKey(page)) return }

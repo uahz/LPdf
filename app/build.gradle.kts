@@ -41,8 +41,8 @@ android {
         applicationId = "com.lpdf.reader"
         minSdk = 33
         targetSdk = 35
-        versionCode = 150
-        versionName = "1.5.0"
+        versionCode = 151
+        versionName = "1.5.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -95,6 +95,9 @@ android {
 
     testOptions {
         unitTests.isIncludeAndroidResources = true
+        // 纯 JVM 单测（不带 @RunWith(RobolectricTestRunner)）里 android.util.Log 默认
+        // 抛 "not mocked"。返回默认值让日志调用变成 no-op，测试只断言返回值。
+        unitTests.isReturnDefaultValues = true
     }
 
     lint {

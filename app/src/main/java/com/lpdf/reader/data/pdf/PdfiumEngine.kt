@@ -425,8 +425,16 @@ object PdfiumEngine {
         }
 
         companion object {
-            /** 常驻缓存的 PdfPage 数量：连续滚动时通常 2~3 页可见，留 6 页余量 */
-            private const val CACHED_PAGES = 6
+            /**
+             * 常驻缓存的 `PdfPage` 数量。
+             *
+             * v1.5.1 从 6 提到 12：分块渲染让同一页的 `plan()` 与 `renderTiles()`
+             * 各调一次 `openPageLocked`，一次滚动会摸到更多页。窗口偏小时
+             * 「plan 打开 → 被挤出 → render 再打开」的重复 open 会明显拖慢翻页。
+             * 单个 `PdfPage` 只持有 native 侧页对象引用（页面内容仍由 PDFium
+             * 按需解析），12 页的额外占用在 KB 级，与位图（MB 级）不是一个量级。
+             */
+            private const val CACHED_PAGES = 12
         }
     }
 
@@ -666,7 +674,7 @@ object PdfiumEngine {
         }
     }
 
-    const val MAX_RENDER_WIDTH = 2048
+    const val MAX_RENDER_WIDTH = 4096
 }
 
 /**
@@ -684,15 +692,65 @@ object PdfiumEngine {
  * 现在尺寸安全由 [planTiles] 负责：先拿到真实比例的整页尺寸，再决定
  * 是分块（保清晰度）还是整体等比降级（保内存）。两条路都保持宽高比。
  *
+ * ## v1.5.1：加一道「比例合理性」防线
+ *
+ * 用户真机上曾出现 A4 页面被算成 `1168×13657` —— 高度是正常值（1652）的
+ * 8.9 倍，反推出的渲染宽度是 **9657px**，而屏幕物理宽只有 1168px。
+ * 分块算法能兜住这种输入（不会崩、不会白屏），但页面会变成一条极细的长条，
+ * 标注也全错位。所以这里不能只依赖下游兜底，必须在源头识别「不可能的比例」。
+ *
+ * 具体做法：用 `getPageWidthPoint/getPageHeightPoint` 拿到页面的**真实点阵比例**，
+ * 与 `getPageHeight(w)/w` 得到的比例比对。两者应当完全一致（都来自同一个
+ * /MediaBox）。一旦偏差超过 3%，说明 `getPageHeight` 的输入或输出被污染，
+ * 此时**信任点阵比例**重新算高度 —— 点阵比例是整数点位，不容易被缩放污染。
+ *
+ * 这一步不会误伤正常页面：正常页两者比例天生相等，浮点误差 < 0.2%。
+ *
  * @return (宽, 高)，宽高比与 PDF 页面一致
  */
 internal fun renderSize(page: PdfPage, targetWidthPx: Int): Pair<Int, Int> {
     val w = targetWidthPx.coerceIn(64, PdfiumEngine.MAX_RENDER_WIDTH)
     val h = page.getPageHeight(w)
-    // 页面句柄失效时 PDFium 返回 -1，此时退回 A4 比例占位，避免建出负尺寸位图
-    if (h <= 0) return w to (w * 1.4142f).toInt().coerceAtLeast(1)
-    return w to h
+    return sanitizePageSize(w, h, page.getPageWidthPoint(), page.getPageHeightPoint())
 }
+
+/**
+ * 页面像素尺寸的合理性校验（v1.5.1，纯函数可单测）。
+ *
+ * 以点阵尺寸为基准，校验 `rawHeight / width` 是否与页面真实宽高比一致。
+ * 偏差超过 [DRIFT_TOLERANCE] 判定为「输入被污染」，按点阵比例重算高度。
+ *
+ * @param width 本次渲染宽度（px）
+ * @param rawHeight PDFium `getPageHeight(width)` 的返回值
+ * @param widthPt 页面点阵宽（pt）
+ * @param heightPt 页面点阵高（pt）
+ */
+internal fun sanitizePageSize(
+    width: Int,
+    rawHeight: Int,
+    widthPt: Int,
+    heightPt: Int
+): Pair<Int, Int> {
+    // 句柄失效：PDFium 返回 -1，退回 A4 比例占位
+    if (rawHeight <= 0) return width to (width * 1.4142f).toInt().coerceAtLeast(1)
+    if (widthPt <= 0 || heightPt <= 0) return width to rawHeight
+
+    val expect = heightPt.toFloat() / widthPt
+    val actual = rawHeight.toFloat() / width
+    val drift = kotlin.math.abs(actual - expect) / expect
+    if (drift <= DRIFT_TOLERANCE) return width to rawHeight
+
+    val fixed = (width * expect).toInt().coerceAtLeast(1)
+    android.util.Log.w(
+        "PdfiumEngine",
+        "页高比例异常：算出 ${width}×$rawHeight（比例 $actual），" +
+            "点阵比例 $expect（${widthPt}×${heightPt} pt）。已修正为 ${width}×$fixed。"
+    )
+    return width to fixed
+}
+
+/** 页高比例允许的偏差。正常页面两者都来自同一个 /MediaBox，误差 < 0.2% */
+internal const val DRIFT_TOLERANCE = 0.03f
 
 /**
  * 渲染硬约束（单位：像素）。

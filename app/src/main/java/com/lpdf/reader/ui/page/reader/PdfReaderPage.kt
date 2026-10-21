@@ -48,6 +48,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -64,9 +65,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
@@ -121,10 +122,6 @@ fun PdfReaderPage(
     val colors = LocalColors.current
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val density = LocalDensity.current
-    val screenWidthPx = with(density) {
-        LocalConfiguration.current.screenWidthDp.dp.toPx().toInt()
-    }
 
     // 绑定文档（uri + mtime 由导航参数给出，缺失时用 0 仍可读）
     LaunchedEffect(uri) {
@@ -179,8 +176,29 @@ fun PdfReaderPage(
 
         // -------- L2：被玻璃采样的内容层（页面位图） --------
         content = {
-            Box(Modifier.fillMaxSize()) {
-            if (state.error != null) {
+            // 渲染宽度 = 内容区实测宽度（物理像素）。
+            //
+            // 这里**不能**用 `LocalConfiguration.screenWidthDp.dp.toPx()`：v1.5.1
+            // 定位到的根因就是它。在桌面/自由窗口模式（Android 12L+、折叠屏展开态、
+            // 分屏）下 `screenWidthDp` 是「窗口」的 dp 宽，而 Compose 布局又会被父容器
+            // 再限一次宽，两者对不上；再叠上 density 的真实换算，渲染宽度就会被放大到
+            // 屏幕物理宽的数倍 —— 高度按同比例放大，最终就是用户截图里的 1168×13657
+            // （反推宽度 9657px，正好是 1168 的 8.3 倍）。
+            //
+            // 实测约束拿到的是**物理像素**，之后不再有任何 dp/density 换算，
+            // 从源头消灭「宽度被放大」这条路径（sanitizePageSize 只作兜底）。
+            var contentWidthPx by remember { mutableIntStateOf(0) }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onSizeChanged { if (it.width > 0) contentWidthPx = it.width }
+            ) {
+            if (contentWidthPx == 0) {
+                // 第一帧拿不到尺寸：先不渲染，避免用错误宽度先渲一遍再重渲
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    GlassProgressRing(label = "正在打开…")
+                }
+            } else if (state.error != null) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     GlassStateCard(
                         icon = if (state.error is com.lpdf.reader.core.model.PdfError.PasswordRequired)
@@ -226,7 +244,7 @@ fun PdfReaderPage(
                         PageCanvas(
                             vm = vm,
                             page = state.currentPage,
-                            widthPx = screenWidthPx,
+                            widthPx = contentWidthPx,
                             maxZoom = settings.zoomLimit.toFloat(),
                             modifier = Modifier.fillMaxSize()
                         )
@@ -252,7 +270,7 @@ fun PdfReaderPage(
                             PageItem(
                                 vm = vm,
                                 page = page,
-                                widthPx = screenWidthPx,
+                                widthPx = contentWidthPx,
                                 settings = settings,
                                 highlightColor = state.highlightColor,
                                 tool = if (state.chromeVisible) state.tool else EditorTool.NONE

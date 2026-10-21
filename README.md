@@ -1,4 +1,4 @@
-# LPdf 1.5.0 · Android PDF 阅读器
+# LPdf 1.5.1 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.5.0-release.apk
+adb install -r dist/LPdf-1.5.1-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -27,7 +27,7 @@ export JAVA_HOME=/opt/jdk21
 export ANDROID_HOME=/opt/android-sdk
 ./gradlew :app:assembleRelease       # 产物 app/build/outputs/apk/release/
 ./gradlew :app:assembleDebug         # 仅供本地调试，不发布
-./gradlew :app:testDebugUnitTest     # 119 个单测
+./gradlew :app:testDebugUnitTest     # 135 个单测
 ```
 
 **签名配置**：`keystore.properties` 与 `keystore/` 均不入库。首次构建若无这两者，
@@ -35,6 +35,80 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.5.1 变更
+
+1.5.0 把「渲染」和「玻璃」两件事都推到了新架构上，也顺手留下了三处需要收尾的地方。
+这一版不加功能，只做加固。
+
+### 一、渲染宽度的真凶找到了：`screenWidthDp` 不可信
+
+1.5.0 加了 `sanitizePageSize`，能把畸形的 `1168×13657` 修正回来 —— 但那是**兜底**，
+没人喜欢兜底被触发。这一版回到源头。
+
+反推：`13657 ÷ 1.4142 ≈ 9657`，渲染宽度是屏幕物理宽的 **8.3 倍**。而当时的代码是：
+
+```kotlin
+val screenWidthPx = with(density) {
+    LocalConfiguration.current.screenWidthDp.dp.toPx().toInt()
+}
+```
+
+在普通手机上这行恰好等于物理宽，所以「一直看着是对的」。它错在语义：
+`screenWidthDp` 描述的是**窗口**的 dp 宽，受自由窗口 / 分屏 / 折叠屏展开 /
+厂商改写的 `densityDpi` 影响，一旦和实际布局宽度脱钩，再乘一次 density 就被放大。
+
+现在改成内容区的**实测物理像素**：
+
+```kotlin
+var contentWidthPx by remember { mutableIntStateOf(0) }
+Box(Modifier.fillMaxSize().onSizeChanged { if (it.width > 0) contentWidthPx = it.width }) { ... }
+```
+
+拿到之后不再有任何 dp ↔ px 换算，这条路径物理上不可能再被放大。
+`sanitizePageSize` 保留，降级为纯粹的最后一道网。
+
+顺带修掉一个连带问题：`ensureRendered` 原本「已完整就 return」，而渲染宽度现在
+会随窗口尺寸变化 —— 横屏或拉伸窗口后页面会一直是旧的低分辨率版本，看着糊却刷不新。
+现在把已渲染宽度纳入判断（差值 < 10% 视为等效，避免窗口微抖时反复重渲）。
+
+### 二、`MAX_RENDER_WIDTH` 从 2048 提到 4096
+
+1.5.0 的分块上限是 `TileLimits.MAX_EDGE = 8192`（单张位图单边），而渲染宽度上限
+还停在 2048 —— 意味着**一页最宽只能渲到 2048 像素**。平板 / 桌面模式下放大后，
+块内清晰度和块边界会明显断层。
+
+4096 是 8192 的一半，既保证分块算法在绝大多数页面上退化成单块（A4 @4096 宽只有
+5792 高，仍是一块），也给了平板足够的清晰度余量。
+
+### 三、`PdfPage` 缓存 6 → 12，减少翻页时的重复 open
+
+分块渲染让同一页的 `plan()` 和 `renderTiles()` 各调一次 `openPageLocked()`，
+一次滚动会摸到更多页。窗口偏小时会出现「plan 打开 → 被挤出 LRU → render 再打开」
+的重复开销。12 页的 `PdfPage` 引用只占 KB 级 native 内存，和位图（MB 级）不是一个量级。
+
+### 四、测试
+
+135 个单测，新增 16 个：
+
+| 文件 | 守什么 |
+| --- | --- |
+| `RealPdfGeometryTest`（12） | 用真实 399 页 A4 PDF 的 `/MediaBox` 跑完整几何链路；`sanitizePageSize` 的六条防污染用例 |
+| `RenderWidthSourceTest`（4） | 渲染宽度只能来自实测像素；上限截断与下限抬升；尺寸变化能触发状态更新 |
+
+> `RenderWidthSourceTest` 里有一条看起来自相矛盾的断言：沙箱中 `screenWidthDp`
+> 与实测宽度**必须相等**。这恰恰是要说明的事 —— Robolectric 是「理想设备」，
+> 真实设备上的漂移在本地永远测不出来，所以才必须改用实测宽度。
+
+**反向验证**：把 `MAX_RENDER_WIDTH` 改回 2048，`RealPdfGeometryTest` 立刻 2 项红。
+确认新测试不是摆设。
+
+### 五、顺手记一笔：`android.util.Log` 在纯 JVM 单测下会抛
+
+`RealPdfGeometryTest` 不带 Robolectric，`sanitizePageSize` 里的一句 `Log.w`
+会把测试炸掉（`Method w in android.util.Log not mocked`）。
+`testOptions { unitTests.isReturnDefaultValues = true }` 解决 ——
+纯逻辑测试没必要为了打日志去启动整个 Android 运行时。
 
 ## 1.5.0 变更
 
