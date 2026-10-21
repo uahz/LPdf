@@ -127,8 +127,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          # 只发签名后的 release 包。
+          # debug 包给用户只会造成「不知道该下哪个」——CI 的 Debug 产物
+          # 仍保留在 Actions artifacts 里供开发排查，不进 Release 页面。
           files: |
-            app/build/outputs/apk/debug/*.apk
             app/build/outputs/apk/release/*.apk
           # 发布说明由发版流程手写；这里若开 generate_release_notes，
           # 在 Release 已存在时会调用一个需要更高权限的接口并报 403。

@@ -1,28 +1,33 @@
-# LPdf 1.3.0 · Android PDF 阅读器
+# LPdf 1.3.2 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
 
-## 直接安装
+## 下载安装
 
-```
-dist/LPdf-1.3.0-release.apk   # 已签名，推荐安装
-dist/LPdf-1.3.0-debug.apk     # 已签名，applicationId 带 .debug 后缀，可与正式版共存
-```
+**只发布一个包：`LPdf-x.y.z-release.apk`（已签名）。**
+
+- 最新版：[Releases](https://github.com/uahz/LPdf/releases/latest)
+- 网盘、本地 `dist/` 目录中也只有 release 包
+
+debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一倍、且未做资源收缩，
+放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.3.0-release.apk
+adb install -r dist/LPdf-1.3.2-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
+自 1.1.0 至今签名未变，可跨版本覆盖升级。
 
 ## 自行构建
 
 ```bash
 export JAVA_HOME=/opt/jdk21
 export ANDROID_HOME=/opt/android-sdk
-./gradlew :app:assembleDebug        # 产物 app/build/outputs/apk/debug/
-./gradlew :app:testDebugUnitTest    # 26 个单测
+./gradlew :app:assembleRelease       # 产物 app/build/outputs/apk/release/
+./gradlew :app:assembleDebug         # 仅供本地调试，不发布
+./gradlew :app:testDebugUnitTest     # 59 个单测
 ```
 
 **签名配置**：`keystore.properties` 与 `keystore/` 均不入库。首次构建若无这两者，
@@ -30,6 +35,20 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.3.2 变更
+
+| 类型 | 内容 |
+|---|---|
+| **修复** | **点开图标立刻消失**：`SquircleShape` 只实现 `Shape` 且返回 `Outline.Generic`，而液态玻璃库的 `lens()` 要求 `shape is CornerBasedShape`，否则直接抛 `UnsupportedOperationException`。每个玻璃组件首帧必崩。改为继承 `CornerBasedShape` 并实现 `copy()` / `createOutline(size, 四角半径, layoutDirection)` |
+| **修复** | `enableEdgeToEdge()` 被放在 `super.onCreate()` 之前 —— 该方法第一步就要拿 `decorView`，window 未 attach 必崩 |
+| **修复** | `LpdfApplication` 启动清理挂在 `SupervisorJob` 上，异常会杀进程；改为 `runCatching` |
+| **新增** | **玻璃能力探测**：启动时构造并编译一个最小 AGSL 着色器，编译过才算真支持，而非只看 `SDK_INT`（Android 13 只是暴露 API，实际编译在 GPU 驱动层，ROM 可阉割） |
+| **新增** | **三级降级**：`FULL`（折射+模糊+高光）→ `BLUR_ONLY`（无折射）→ `PLAIN`（加深半透明底）。`lens()` 与 `blur()` 各自 `runCatching`，失败即降级并触发重组 |
+| **新增** | **全局同步降级**：能力状态单例，一处降级全局一起降，避免一半折射一半不折射 |
+| **新增** | **崩溃留痕**：`Thread.setDefaultUncaughtExceptionHandler` + 首屏可查看/复制报告；界面异常走 `FatalErrorScreen` 而非直接退出 |
+| **新增** | 设置 → 通用 → 玻璃渲染：显示当前等级与降级轨迹，用户反馈时可直接读到 |
+| **改进** | **发布策略**：Release 只发 release 包，debug 包不再对外（包名带 `.debug` 后缀、体积大一倍，放出来只让用户困惑） |
 
 ## 1.3.0 变更
 
