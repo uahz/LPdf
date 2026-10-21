@@ -26,6 +26,8 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -62,7 +64,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -76,6 +79,7 @@ import com.lpdf.reader.data.local.Annotation
 import com.lpdf.reader.data.local.AnnotRect
 import com.lpdf.reader.data.local.AppSettings
 import com.lpdf.reader.data.local.ReadingMode
+import com.lpdf.reader.data.pdf.PageRender
 import com.lpdf.reader.ui.glass.GlassIconButton
 import com.lpdf.reader.ui.glass.GlassPillButton
 import com.lpdf.reader.ui.glass.GlassProgressRing
@@ -93,6 +97,7 @@ import com.lpdf.reader.ui.theme.LSpace
 import com.lpdf.reader.ui.theme.LType
 import com.lpdf.reader.ui.theme.LocalColors
 import com.lpdf.reader.ui.theme.Motion
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
 /**
@@ -541,7 +546,7 @@ private fun PageItem(
         )
     }
     val areaWidthPx = (widthPx - bounds.padH * 2).toInt().coerceAtLeast(240)
-    var bitmap by remember(page) { mutableStateOf<Bitmap?>(vm.bitmapFor(page)) }
+    var render by remember(page) { mutableStateOf(vm.renderFor(page)) }
     // 渲染失败时记下原因，避免「一直转圈却不说是错」
     var failure by remember(page) { mutableStateOf<String?>(null) }
 
@@ -550,11 +555,11 @@ private fun PageItem(
         // 会话可能还在打开中（ensureRendered 里 session 为 null 会直接返回）。
         // 轮询等它就绪，但**必须有上限** —— 原来没有上限，一旦渲染永远失败，
         // 这个圆环就永远转下去，用户看到的就是「打开 PDF 一直转圈」。
-        while (bitmap == null && attempts < MAX_RENDER_RETRY) {
+        while (render?.tiles.isNullOrEmpty() && attempts < MAX_RENDER_RETRY) {
             attempts++
             vm.ensureRendered(page, areaWidthPx)
-            bitmap = vm.bitmapFor(page)
-            if (bitmap != null) break
+            render = vm.renderFor(page)
+            if (!render?.tiles.isNullOrEmpty()) break
             val err = vm.lastRenderError(page)
             if (err != null) {
                 failure = err
@@ -562,9 +567,17 @@ private fun PageItem(
             }
             kotlinx.coroutines.delay(if (attempts < 3) 120L else 400L)
         }
-        if (bitmap == null && failure == null) {
+        if (render?.tiles.isNullOrEmpty() && failure == null) {
             failure = "页面渲染超时，可尝试切换页面或重新打开文档"
         }
+    }
+
+    // 占位高度：v1.5.0 起用**真实宽高比**。
+    // 旧版写死 A4 的 1.414f，超长页会先占一个矮框，渲染完突然撑高 ——
+    // 列表整段跳动，用户还会以为点错了位置。
+    val aspect = render?.aspect ?: 1.414f
+    val pageHeightDp = with(LocalDensity.current) {
+        (areaWidthPx * aspect / density).dp
     }
 
     Box(
@@ -573,12 +586,13 @@ private fun PageItem(
             .padding(horizontal = 16.dp)
             .clip(Shapes2.M),
     ) {
-        if (bitmap == null) {
+        val current = render
+        if (current == null || current.tiles.isEmpty()) {
             // 纸张占位（避免白屏跳动）
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .height((areaWidthPx * 1.414f).dp / 1f / LocalDensity.current.density)
+                    .height(pageHeightDp)
                     .background(Color.White.copy(alpha = 0.98f)),
                 contentAlignment = Alignment.Center
             ) {
@@ -604,7 +618,7 @@ private fun PageItem(
             }
         } else {
             AnnotationLayer(
-                bitmap = bitmap!!,
+                render = current,
                 annotations = vm.annotationsOf(page),
                 tool = tool,
                 highlightColor = highlightColor,
@@ -638,11 +652,11 @@ private fun PageCanvas(
 ) {
     var zoom by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
-    var bitmap by remember(page) { mutableStateOf<Bitmap?>(vm.bitmapFor(page)) }
+    var render by remember(page) { mutableStateOf(vm.renderFor(page)) }
 
     LaunchedEffect(page) {
         vm.ensureRendered(page, widthPx)
-        bitmap = vm.bitmapFor(page)
+        render = vm.renderFor(page)
     }
     val z by animateFloatAsState(zoom, Motion.standard, label = "zoom")
 
@@ -656,15 +670,13 @@ private fun PageCanvas(
             },
         contentAlignment = Alignment.Center
     ) {
-        val bmp = bitmap
-        if (bmp == null) {
+        val current = render
+        if (current == null || current.tiles.isEmpty()) {
             GlassProgressRing()
         } else {
-            Image(
-                bitmap = bmp.asImageBitmap(),
-                contentDescription = "第 ${page + 1} 页",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
+            // 单页模式：按真实宽高比自适应填充，用同一套 tile 绘制
+            BoxWithConstraints(
+                Modifier
                     .fillMaxSize()
                     .padding(horizontal = 8.dp)
                     .graphicsLayer {
@@ -672,19 +684,83 @@ private fun PageCanvas(
                         scaleY = z
                         translationX = offset.x
                         translationY = offset.y
-                    }
-            )
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                val wPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+                val hPx = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+                // 等比缩放：宽高各让一步，装不下就缩
+                val fitW = minOf(wPx, hPx / current.aspect.coerceAtLeast(0.01f))
+                val drawW = with(LocalDensity.current) { fitW.toDp() }
+                TileCanvas(
+                    render = current,
+                    contentDescription = "第 ${page + 1} 页",
+                    modifier = Modifier
+                        .width(drawW)
+                        .aspectRatio(1f / current.aspect.coerceAtLeast(0.01f))
+                )
+            }
         }
     }
 }
 
 /**
- * 标注层：位图 + 归一化坐标标注 + 手指绘制。
- * 归一化坐标 0~1，与缩放无关。
+ * 一页的 tile 绘制（v1.5.0）。
+ *
+ * ## 为什么用 Canvas 而不是 N 个 Image
+ *
+ * 每个 `Image` 都是独立图层，高 DPI 下相邻两张之间会漏出 1px 白线，
+ * 长页上就是一条条横纹。放在同一个 Canvas 里按整页坐标连续绘制，
+ * 边缘天然重合，零缝隙。
+ *
+ * ## 坐标换算
+ *
+ * tile 的 left/top/width/height 都是「整页理想像素坐标」（[PageRender.widthPx] ×
+ * [PageRender.heightPx]）。这里按控件实测尺寸等比映射，
+ * 因此缩放、密度变化都不会让标注和底图错位。
+ */
+@Composable
+private fun TileCanvas(
+    render: PageRender,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    overlay: androidx.compose.ui.graphics.drawscope.DrawScope.() -> Unit = {}
+) {
+    val images = remember(render.tiles) {
+        render.tiles.map { it to it.bitmap.asImageBitmap() }
+    }
+    Canvas(
+        modifier.semantics { this.contentDescription = contentDescription ?: "" }
+    ) {
+        val sx = size.width / render.widthPx.toFloat().coerceAtLeast(1f)
+        val sy = size.height / render.heightPx.toFloat().coerceAtLeast(1f)
+        images.forEach { (tile, img) ->
+            drawImage(
+                image = img,
+                dstOffset = androidx.compose.ui.unit.IntOffset(
+                    (tile.left * sx).roundToInt(),
+                    (tile.top * sy).roundToInt()
+                ),
+                dstSize = androidx.compose.ui.unit.IntSize(
+                    (tile.width * sx).roundToInt().coerceAtLeast(1),
+                    (tile.height * sy).roundToInt().coerceAtLeast(1)
+                ),
+                // 分块边界天然重合，FilterQuality.Low 足够且更省带宽；
+                // 用 Medium 反而会在接缝处采样到邻居产生细线。
+                filterQuality = androidx.compose.ui.graphics.FilterQuality.Low
+            )
+        }
+        overlay()
+    }
+}
+
+/**
+ * 标注层：底图（一组 tile）+ 归一化坐标标注 + 手指绘制。
+ * 归一化坐标 0~1，与缩放无关，所以底图分几块、怎么降级都不影响标注位置。
  */
 @Composable
 private fun AnnotationLayer(
-    bitmap: Bitmap,
+    render: PageRender,
     annotations: List<Annotation>,
     tool: EditorTool,
     highlightColor: Long,
@@ -692,11 +768,10 @@ private fun AnnotationLayer(
     activeSearchRects: List<com.lpdf.reader.data.pdf.PdfiumEngine.AnnotRectLike> = emptyList(),
     onAdd: (Annotation) -> Unit
 ) {
-    val image = remember(bitmap) { bitmap.asImageBitmap() }
     val ink = remember { mutableListOf<Offset>() }
 
     // 签名位图缓存：路径 -> ImageBitmap。签名图不大且复用频繁，按路径记忆即可
-    val signatureBitmaps = remember(bitmap, annotations) {
+    val signatureBitmaps = remember(annotations) {
         buildMap {
             annotations.filterIsInstance<Annotation.Signature>().forEach { s ->
                 if (!containsKey(s.bitmapPath)) {
@@ -708,9 +783,12 @@ private fun AnnotationLayer(
         }
     }
 
+    val aspect = render.aspect.coerceAtLeast(0.01f)
+
     Box(
         Modifier
             .fillMaxWidth()
+            .aspectRatio(1f / aspect)
             .pointerInput(tool) {
                 when (tool) {
                     EditorTool.INK -> detectDragGestures(
@@ -773,15 +851,27 @@ private fun AnnotationLayer(
                 }
             }
     ) {
-        Image(
-            bitmap = image,
-            contentDescription = null,
-            contentScale = ContentScale.FillWidth,
-            modifier = Modifier.fillMaxWidth()
-        )
         Canvas(Modifier.matchParentSize()) {
             val w = size.width
             val h = size.height
+
+            // ① 底图：按整页坐标拼 tile，零缝隙
+            val sx = w / render.widthPx.toFloat().coerceAtLeast(1f)
+            val sy = h / render.heightPx.toFloat().coerceAtLeast(1f)
+            render.tiles.forEach { tile ->
+                drawImage(
+                    image = tile.bitmap.asImageBitmap(),
+                    dstOffset = androidx.compose.ui.unit.IntOffset(
+                        (tile.left * sx).roundToInt(),
+                        (tile.top * sy).roundToInt()
+                    ),
+                    dstSize = androidx.compose.ui.unit.IntSize(
+                        (tile.width * sx).roundToInt().coerceAtLeast(1),
+                        (tile.height * sy).roundToInt().coerceAtLeast(1)
+                    ),
+                    filterQuality = androidx.compose.ui.graphics.FilterQuality.Low
+                )
+            }
 
             // 搜索结果高亮：先铺淡黄底，再把当前聚焦的命中覆上橙色
             searchRects.forEach { r ->

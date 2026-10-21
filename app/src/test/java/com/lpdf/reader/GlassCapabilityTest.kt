@@ -142,20 +142,26 @@ class GlassCapabilityTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `GlassSpec 默认允许折射`() {
+    fun `GlassSpec 默认开启折射与色散`() {
         val spec = com.lpdf.reader.ui.theme.GlassSpec()
-        assertTrue(spec.allowRefraction)
-        assertEquals(0.12f, spec.refraction, 0.0001f)
-        // v1.3.5：10dp 时底层正文仍清晰可辨，玻璃像透明塑料；提到 18dp。
-        // 这里断言「大于等于 16」而不是钉死数值，避免以后微调就得改测试。
-        assertTrue("模糊半径应足够糊掉底层文字", spec.blurDp >= 16f)
+        // v1.5.0：`allowRefraction` 这个字段被删掉了 —— 它的职责已经由
+        // 「设备能力探测 → intensity 归零」统一承担（见 LPdfApp），
+        // 同一个语义有两个数据源正是前面出问题的根源。
+        assertTrue("折射位移必须为正", spec.refractionAmountPx > 0f)
+        assertTrue("色散默认开启", spec.chromaticAberration)
+        assertTrue("模糊半径应足够糊掉底层文字", spec.blurDp >= 12f)
     }
 
     @Test
-    fun `copy 可关闭折射而不影响其他参数`() {
-        val spec = com.lpdf.reader.ui.theme.GlassSpec().copy(allowRefraction = false)
-        assertFalse(spec.allowRefraction)
-        assertTrue("关闭折射不应改动模糊半径", spec.blurDp >= 16f)
-        assertEquals("关闭折射不应改动高光", 0.15f, spec.highlightAlpha, 0.0001f)
+    fun `copy 可关闭色散而不影响其他参数`() {
+        val spec = com.lpdf.reader.ui.theme.GlassSpec().copy(chromaticAberration = false)
+        assertFalse("关闭色散用于低端机降负载", spec.chromaticAberration)
+        assertTrue("关闭色散不应改动模糊半径", spec.blurDp >= 12f)
+        assertEquals(
+            "关闭色散不应改动高光",
+            com.lpdf.reader.ui.theme.GlassSpec().highlightIntensity,
+            spec.highlightIntensity,
+            0.0001f
+        )
     }
 }

@@ -65,9 +65,11 @@ fun LPdfApp(
 
     LPdfTheme(
         dark = dark,
-        // 把探测结果并进 GlassSpec：设备不支持 AGSL 时，整个应用拿到的
-        // 折射参数就是 0，而不是靠每个玻璃组件自己再判断一次
-        glass = settings.toGlassSpec().copy(allowRefraction = glassCapability.hasRefraction)
+        // 把探测结果并进 GlassSpec：设备不支持 AGSL 时整体强度归零，
+        // 玻璃退化为纯模糊 + 底色，而不是靠每个组件自己再判断一次
+        glass = settings.toGlassSpec().let { spec ->
+            if (glassCapability.hasRefraction) spec else spec.copy(intensity = 0f)
+        }
     ) {
         CompositionLocalProvider(LocalGlassCapability provides glassCapability) {
             NavHost(navController = navController, startDestination = Routes.LIST) {

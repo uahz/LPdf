@@ -381,10 +381,12 @@ fun GlassGroup(
                 modifier = Modifier.padding(start = 8.dp, bottom = 8.dp)
             )
         }
-        LiquidGlass(
+        // v1.5.0：设置分组属于**内容层**（承载可读信息），按 Apple HIG
+        // 不能用折射玻璃 —— 折射会让文字边缘跟着底层一起弯曲，
+        // 长列表滚动时整页都在扭。改走 GlassContentCard（纯模糊 + 底色）。
+        GlassContentCard(
             Modifier.fillMaxWidth(),
-            shape = Shapes2.XL,
-            showHighlight = false
+            shape = Shapes2.XL
         ) {
             androidx.compose.foundation.layout.Column(Modifier.fillMaxWidth()) { content() }
         }

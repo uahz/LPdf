@@ -245,7 +245,8 @@ fun GlassStateCard(
     modifier: Modifier = Modifier
 ) {
     val colors = LocalColors.current
-    LiquidGlass(modifier.width(300.dp), shape = Shapes2.XL) {
+    // v1.5.0：状态卡是内容层（要读标题与说明），不用折射玻璃
+    GlassContentCard(modifier.width(300.dp), shape = Shapes2.XL) {
         Column(
             Modifier
                 .fillMaxWidth()

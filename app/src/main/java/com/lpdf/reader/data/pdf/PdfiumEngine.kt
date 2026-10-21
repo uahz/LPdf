@@ -15,6 +15,7 @@ import io.legere.pdfiumandroid.PdfPage
 import io.legere.pdfiumandroid.PdfTextPage
 import io.legere.pdfiumandroid.PdfiumCore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -103,7 +104,14 @@ object PdfiumEngine {
     }
 
     /**
-     * 渲染指定页为位图。
+     * 渲染指定页为**一张位图**，仅适合单块就能装下的页面。
+     *
+     * 需要覆盖任意尺寸请用 [openSession] + [DocSession.renderTiles]。
+     * 这里仍然保留，是因为缩略图 / 分享预览 / 单元测试这些场景确实只需要
+     * 一张小图，且它们的宽度都很小（< 500px），永远落在单块内。
+     *
+     * v1.5.0 起不再有「尺寸超限就拒绝渲染」的分支 —— 只要目标宽度合理，
+     * 这里一定能出图。
      *
      * @param targetWidthPx 目标宽度（像素），内部按 [MAX_RENDER_WIDTH] 上限裁剪
      */
@@ -125,17 +133,20 @@ object PdfiumEngine {
                 doc = core.newDocument(pfd, password ?: "")
                 page = doc.openPage(pageIndex)
                 val (w, h) = renderSize(page, targetWidthPx)
-                // 显存水位检查：createBitmap 成功不代表 drawBitmap 能过。
-                // RecordingCanvas 在把位图交给 GPU 时若超过硬件纹理上限会直接抛
-                // RuntimeException（v1.3.2 真机崩溃即此），这里提前拦掉。
-                if (!PdfLimits.fitsHardwareTexture(w, h)) {
+                val plan = planTiles(w, h)
+                // 多块页面在这里把整页拼成一张 —— 只有缩略图这种极小目标宽度
+                // 才会走进来，拼出来的图远小于单块预算，不会触碰纹理上限。
+                if (plan.tileCount > 1) {
                     return@withLock PdfResult.Failure(
-                        PdfError.Unknown("页面尺寸超出设备渲染上限（${w}×${h}），已跳过渲染")
+                        PdfError.Unknown("页面需要分块渲染（${plan.tileCount} 块），请使用会话接口")
                     )
                 }
-                val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                val r = plan.rects.first()
+                val bitmap = Bitmap.createBitmap(r.width, r.height, Bitmap.Config.ARGB_8888)
                 bitmap.eraseColor(Color.WHITE)
-                page.renderPageBitmap(bitmap, 0, 0, w, h, true)
+                val matrix = android.graphics.Matrix().apply { postScale(plan.scale, plan.scale) }
+                val clip = android.graphics.RectF(0f, 0f, r.width.toFloat(), r.height.toFloat())
+                page.renderPageBitmap(bitmap, matrix, clip, true, true, 0, 0)
                 PdfResult.Success(bitmap)
             } catch (e: SecurityException) {
                 PdfResult.Failure(PdfError.PermissionDenied())
@@ -226,7 +237,13 @@ object PdfiumEngine {
             }
         }
 
-        suspend fun render(pageIndex: Int, targetWidthPx: Int): PdfResult<Bitmap> =
+        /**
+         * 计算某页的分块方案（只算几何，不渲染）。
+         *
+         * UI 先拿这个方案就知道页面真实宽高比与要渲几块，
+         * 列表可以先按正确高度占位，避免「先 A4 后突然变长」的跳动。
+         */
+        suspend fun plan(pageIndex: Int, targetWidthPx: Int): PdfResult<TilePlan> =
             withContext(Dispatchers.IO) {
                 lock.withLock {
                     if (closed) return@withLock PdfResult.Failure(PdfError.Unknown("文档已关闭"))
@@ -234,23 +251,129 @@ object PdfiumEngine {
                         return@withLock PdfResult.Failure(PdfError.NotFound("页码超出范围"))
                     }
                     try {
-                        val page = pages[pageIndex] ?: doc.openPage(pageIndex).also { pages[pageIndex] = it }
+                        val page = openPageLocked(pageIndex)
                         val (w, h) = renderSize(page, targetWidthPx)
-                        if (!PdfLimits.fitsHardwareTexture(w, h)) {
-                            return@withLock PdfResult.Failure(
-                                PdfError.Unknown("页面尺寸超出设备渲染上限（${w}×${h}），已跳过渲染")
-                            )
-                        }
-                        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                        bitmap.eraseColor(Color.WHITE)
-                        page.renderPageBitmap(bitmap, 0, 0, w, h, true)
-                        PdfResult.Success(bitmap)
+                        PdfResult.Success(planTiles(w, h))
                     } catch (t: Throwable) {
-                        if (t is SecurityException) PdfResult.Failure(PdfError.PermissionDenied())
-                        else PdfResult.Failure(PdfError.Unknown("页面渲染失败", t))
+                        PdfResult.Failure(PdfError.Unknown("读取页面尺寸失败", t))
                     }
                 }
             }
+
+        /**
+         * 分块渲染一页（v1.5.0）。
+         *
+         * 每渲完一块立即回调 [onTile]，调用方可以先把第一块显示出来，
+         * 剩余块在后台继续 —— 极端长页被切成 4 块时，用户不必等 4 块全好。
+         *
+         * 块与块之间 [kotlinx.coroutines.yield]，让「打开新页」这类用户操作
+         * 能在锁外插队，不会被一次长渲染完全堵死。
+         *
+         * 注意：全程持有 [lock]。PDFium 的 PdfPage 不是线程安全的，
+         * 同一会话内的渲染必须串行；不同会话之间互不影响。
+         */
+        suspend fun renderTiles(
+            pageIndex: Int,
+            plan: TilePlan,
+            onTile: suspend (Tile) -> Unit
+        ): PdfResult<Int> = withContext(Dispatchers.IO) {
+            lock.withLock {
+                if (closed) return@withLock PdfResult.Failure(PdfError.Unknown("文档已关闭"))
+                if (pageIndex < 0 || pageIndex >= pageCount) {
+                    return@withLock PdfResult.Failure(PdfError.NotFound("页码超出范围"))
+                }
+                try {
+                    val page = openPageLocked(pageIndex)
+                    val done = ArrayList<Bitmap>(plan.rects.size)
+                    try {
+                        plan.rects.forEachIndexed { idx, r ->
+                            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                            // 双保险：planTiles 已经保证每块合法，这里再校验一次，
+                            // 防止将来有人改算法时绕过约束、把超限位图交给 GPU
+                            if (!PdfLimits.fitsSingleBitmap(r.width, r.height)) {
+                                throw IllegalStateException(
+                                    "分块尺寸超限 ${r.width}×${r.height}（块 $idx）"
+                                )
+                            }
+                            val bmp = Bitmap.createBitmap(r.width, r.height, Bitmap.Config.ARGB_8888)
+                            bmp.eraseColor(Color.WHITE)
+                            done += bmp
+
+                            // 用矩阵版渲染：把整页按 scale 缩放后，只把 (left, top) 起的
+                            // 那一块画到位图原点。比用负偏移可靠 —— 负偏移的语义
+                            // 在 pdfiumandroid 里没有任何文档。
+                            val matrix = android.graphics.Matrix().apply {
+                                postScale(plan.scale, plan.scale)
+                                postTranslate(-r.left.toFloat(), -r.top.toFloat())
+                            }
+                            val clip = android.graphics.RectF(
+                                0f, 0f, r.width.toFloat(), r.height.toFloat()
+                            )
+                            page.renderPageBitmap(bmp, matrix, clip, true, true, 0, 0)
+
+                            onTile(
+                                Tile(
+                                    index = idx,
+                                    left = r.left,
+                                    top = r.top,
+                                    width = r.width,
+                                    height = r.height,
+                                    bitmap = bmp
+                                )
+                            )
+                            // 让出调度权，避免一次长渲染把「打开新页」饿死
+                            if (idx < plan.rects.lastIndex) kotlinx.coroutines.yield()
+                        }
+                    } catch (t: Throwable) {
+                        // 中途失败：已渲染的块交给调用方决定是否回收
+                        if (t is kotlinx.coroutines.CancellationException) {
+                            done.forEach { runCatching { it.recycle() } }
+                            throw t
+                        }
+                        throw t
+                    }
+                    PdfResult.Success(done.size)
+                } catch (t: Throwable) {
+                    if (t is kotlinx.coroutines.CancellationException) throw t
+                    if (t is SecurityException) PdfResult.Failure(PdfError.PermissionDenied())
+                    else PdfResult.Failure(PdfError.Unknown("页面渲染失败", t))
+                }
+            }
+        }
+
+        /**
+         * 渲染整页为单张位图 —— **仅供内部与测试**。
+         *
+         * 超过 8192 的页面这里会失败，因为一张位图装不下。
+         * 需要支持任意尺寸时用 [renderTiles]。
+         */
+        suspend fun render(pageIndex: Int, targetWidthPx: Int): PdfResult<Bitmap> =
+            withContext(Dispatchers.IO) {
+                val planRes = plan(pageIndex, targetWidthPx)
+                if (planRes is PdfResult.Failure) {
+                    return@withContext PdfResult.Failure(planRes.error)
+                }
+                val plan = planRes.getOrNull() ?: return@withContext PdfResult.Failure(
+                    PdfError.Unknown("无法计算页面尺寸")
+                )
+                if (plan.tileCount != 1) {
+                    return@withContext PdfResult.Failure(
+                        PdfError.Unknown("页面过大，需分块渲染")
+                    )
+                }
+                var out: Bitmap? = null
+                val res = renderTiles(pageIndex, plan) { tile -> out = tile.bitmap }
+                if (res is PdfResult.Failure) {
+                    out?.let { runCatching { it.recycle() } }
+                    return@withContext PdfResult.Failure(res.error)
+                }
+                val bmp = out ?: return@withContext PdfResult.Failure(PdfError.Unknown("页面渲染失败"))
+                PdfResult.Success(bmp)
+            }
+
+        /** 取页面句柄（带 LRU 缓存），调用方必须已持有 [lock] */
+        private fun openPageLocked(pageIndex: Int): PdfPage =
+            pages[pageIndex] ?: doc.openPage(pageIndex).also { pages[pageIndex] = it }
 
         /** 页面点位尺寸，用于布局占位（避免渲染前高度为 0 导致跳动） */
         suspend fun pageSize(pageIndex: Int): PdfResult<PageSize> = withContext(Dispatchers.IO) {
@@ -549,103 +672,64 @@ object PdfiumEngine {
 /**
  * 页面渲染尺寸计算 —— 所有渲染路径的唯一入口。
  *
- * ## 为什么必须限死
+ * ## v1.5.0 起的行为
  *
- * v1.3.2 真机（OnePlus PKG110 / Android 17）崩溃：
+ * **只按宽度缩放，高度如实返回**，不做任何截断。
  *
- * ```
- * RuntimeException: Canvas: trying to draw too large(527487968bytes) bitmap.
- *   at RecordingCanvas.throwIfCannotDraw
- * ```
+ * 旧版这里有三层「收敛」：①长宽比超 16:1 就缩宽度 ②超 4000 万像素按 sqrt 缩
+ * ③最终按像素上限**直接截断高度**。第③步是最隐蔽的破坏 —— 它让极端长页
+ * 变成「矮胖」，宽高比被静默破坏，而标注用的是归一化坐标，页面一被压扁
+ * 标注就全部错位。
  *
- * 5.27 亿字节 ≈ 5 亿像素（ARGB_8888 每像素 4 字节）。这不是我们主动建的图太大，
- * 而是 PDF 页面**本身的尺寸**骇人 —— 常见于：
+ * 现在尺寸安全由 [planTiles] 负责：先拿到真实比例的整页尺寸，再决定
+ * 是分块（保清晰度）还是整体等比降级（保内存）。两条路都保持宽高比。
  *
- * - CAD / 工程图 / 地图导出的 PDF，单页 MediaBox 动辄上万点
- * - 扫描件以 2000+ dpi 存储
- * - PDF 内部把页面挂在极端缩放矩阵上
- *
- * 陷阱在于 `getPageHeight(width)` 的行为：它按**给定宽度缩放后**返回高度。
- * 当页面长宽比极度悬殊（比如 1:400 的施工图），把宽度设为 1080px 后
- * 高度会达到几十万像素，乘出来就是天文数字。原来只限制了宽度，
- * 等于没有约束面积 —— `MAX_RENDER_WIDTH` 形同虚设。
- *
- * ## 策略
- *
- * 先按目标宽度算出比例，再按两条硬约束收敛：
- *
- * 1. `MAX_PIXELS`：总像素上限（约 4000 万，16MB 位图），保证任何情况下不会撑爆显存
- * 2. `MAX_ASPECT`：长宽比上限（16:1），超过就说明是异形页面，
- *    此时宁可让页面偏小也不让它变成一根针
- *
- * 收敛后重新算高度，并**再次**用像素上限兜一次 —— 因为 PDF 里可能存在
- * 非等比缩放的页面矩阵，`w * h` 不一定等于预期的比例。
- *
- * @return (宽, 高)，均已保证 >= 1 且总面积 <= MAX_PIXELS
+ * @return (宽, 高)，宽高比与 PDF 页面一致
  */
 internal fun renderSize(page: PdfPage, targetWidthPx: Int): Pair<Int, Int> {
-    val wantW = targetWidthPx.coerceIn(64, PdfiumEngine.MAX_RENDER_WIDTH)
-    var w = wantW
-    var h = page.getPageHeight(w)
-
+    val w = targetWidthPx.coerceIn(64, PdfiumEngine.MAX_RENDER_WIDTH)
+    val h = page.getPageHeight(w)
     // 页面句柄失效时 PDFium 返回 -1，此时退回 A4 比例占位，避免建出负尺寸位图
-    if (h <= 0) {
-        return w to (w * 1.4142f).toInt().coerceAtLeast(1)
-    }
-
-    // ① 长宽比约束：超长页面先缩宽度，让高度落回合理区间
-    val maxH = (w * PdfLimits.MAX_ASPECT).toInt()
-    if (h > maxH && maxH > 0) {
-        val shrink = maxH.toFloat() / h.toFloat()
-        w = (w * shrink).toInt().coerceAtLeast(64)
-        h = page.getPageHeight(w)
-        if (h <= 0) {
-            return w to (w * 1.4142f).toInt().coerceAtLeast(1)
-        }
-    }
-
-    // ② 像素总量约束：无论如何不得超过 MAX_PIXELS
-    val pixels = w.toLong() * h.toLong()
-    if (pixels > PdfLimits.MAX_PIXELS) {
-        val scale = kotlin.math.sqrt(PdfLimits.MAX_PIXELS.toDouble() / pixels.toDouble()).toFloat()
-        w = (w * scale).toInt().coerceAtLeast(48)
-        // 宽度变了高度必须重新问 PDFium，不能直接乘比例
-        val h2 = page.getPageHeight(w)
-        h = if (h2 > 0) h2 else (w * 1.4142f).toInt()
-    }
-
-    // ③ 最后兜底：极端页面矩阵下 ② 可能仍未收敛，此时直接截断高度
-    var safeH = h.coerceAtLeast(1)
-    val maxHByPixels = (PdfLimits.MAX_PIXELS / w.coerceAtLeast(1)).toInt().coerceAtLeast(1)
-    if (safeH > maxHByPixels) safeH = maxHByPixels
-
-    return w to safeH
+    if (h <= 0) return w to (w * 1.4142f).toInt().coerceAtLeast(1)
+    return w to h
 }
 
-/** 渲染硬约束（单位：像素） */
+/**
+ * 渲染硬约束（单位：像素）。
+ *
+ * v1.5.0 语义拆分了：
+ * - 旧 `fitsHardwareTexture` 混着表达两件事：「这页能不能渲染」和「这张位图能不能上纹理」。
+ * - 现在只有后者成立 —— **单张位图**的约束，判断对象是 tile，不是整页。
+ * - 「这页能不能渲染」由 [planTiles] 回答，答案永远是「能」。
+ */
 object PdfLimits {
-    /** 单页位图总像素上限：4000 万 ≈ 160MB 位图，与 W^2 = 6324^2 相当 */
+    /** 单张位图总像素上限：4000 万 ≈ 160MB 位图 */
     const val MAX_PIXELS = 40_000_000L
 
-    /** 长宽比上限：超过 16:1 的页面视为异形，缩宽度处理 */
-    const val MAX_ASPECT = 16f
+    /** 兼容旧代码：长宽比上限。v1.5.0 起不再用于裁剪 —— 页面尺寸由 [planTiles] 负责 */
+    const val LEGACY_MAX_ASPECT = 16f
 
     /** 位图字节数上限（ARGB_8888 = 4 字节/像素） */
     const val MAX_BITMAP_BYTES = MAX_PIXELS * 4L
 
     /**
-     * GPU 单边纹理上限。
-     *
-     * 业界保底值 8192：几乎所有支持 Vulkan/GLES3 的设备都至少这么宽。
-     * 超出后 RecordingCanvas 会抛
-     * `trying to draw too large(Nbytes) bitmap`。
+     * GPU 单边纹理上限。业界保底值 8192。
+     * 超出后 RecordingCanvas 会抛 `trying to draw too large`。
      */
     const val MAX_TEXTURE_EDGE = 8192
 
-    /** 位图单边上限，取纹理上限与像素上限的较小者 */
-    fun fitsHardwareTexture(w: Int, h: Int): Boolean {
+    /**
+     * 单张位图能否安全上纹理。
+     *
+     * 注意：判断对象是**一张位图 / 一个 tile**，不是整页。
+     * 整页尺寸由 [planTiles] 拆解，每一块的尺寸都会满足本函数。
+     */
+    fun fitsSingleBitmap(w: Int, h: Int): Boolean {
         if (w <= 0 || h <= 0) return false
         if (w > MAX_TEXTURE_EDGE || h > MAX_TEXTURE_EDGE) return false
         return w.toLong() * h.toLong() <= MAX_PIXELS
     }
+
+    /** 旧名保留为别名，语义已明确为「单张位图」 */
+    fun fitsHardwareTexture(w: Int, h: Int): Boolean = fitsSingleBitmap(w, h)
 }

@@ -1,4 +1,4 @@
-# LPdf 1.4.0 · Android PDF 阅读器
+# LPdf 1.5.0 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.4.0-release.apk
+adb install -r dist/LPdf-1.5.0-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -27,7 +27,7 @@ export JAVA_HOME=/opt/jdk21
 export ANDROID_HOME=/opt/android-sdk
 ./gradlew :app:assembleRelease       # 产物 app/build/outputs/apk/release/
 ./gradlew :app:assembleDebug         # 仅供本地调试，不发布
-./gradlew :app:testDebugUnitTest     # 103 个单测
+./gradlew :app:testDebugUnitTest     # 119 个单测
 ```
 
 **签名配置**：`keystore.properties` 与 `keystore/` 均不入库。首次构建若无这两者，
@@ -35,6 +35,141 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.5.0 变更
+
+两个目标：**不管页面多大都要渲染**、**液态玻璃做到 Apple Liquid Glass 的程度**。
+
+### 一、渲染：从「拒绝渲染」到「一定能渲染」
+
+真机截图报的是 `页面尺寸超出设备渲染上限（1168×13657），已跳过渲染`。
+
+#### 根因不是阈值太小，是模型错了
+
+Android GPU 单边纹理上限是 **8192**（物理事实，不是可调参数）。PDF 里
+CAD 施工图、海报、地图导出这类页面，按屏幕宽缩放后高度动辄上万 ——
+**整页塞一张位图**这条路在物理上就走不通。旧代码在 `createBitmap` 前拦一道，
+于是变成「跳过渲染」，用户看到一张白纸。
+
+更隐蔽的是旧 `renderSize()` 的第三层兜底会**直接截断高度**：超长页被压成
+「矮胖」，宽高比静默被破坏，而标注用归一化坐标，页面一被压扁标注全部错位。
+这个 bug 一直存在且没有任何日志。
+
+#### 现在：一页 = 一组 tile
+
+```
+整页理想尺寸 ──► planTiles() ──► 若干合法矩形 ──► renderTiles() 逐块回调
+                                   │
+                                   ├─ 每块 ≤ 8192 单边、≤ 64MB
+                                   └─ 整页最多 4 块
+```
+
+在**同一个 Compose Canvas** 里多次 `drawImage` 拼回去。不用 N 个 `Image`：
+每个 `Image` 都是独立图层，高 DPI 下相邻两张会漏 1px 白线，长页上就是横纹。
+
+新增 `PageTiling.kt`（纯函数，不碰 Bitmap）与 `PageRender.kt`（运行时状态）。
+渲染用 pdfiumandroid 的**矩阵版** `renderPageBitmap(bmp, matrix, clipRect, ...)`
+直通 `nativeRenderPageBitmapWithMatrix`，比用负偏移可靠。
+
+#### 降级策略：二分求最大可行缩放
+
+预算内（≤4 块）走 1:1 全清晰度。超预算时**不是套公式** ——
+直观写法 `s = sqrt(4×64MB / 总像素)` 对 `1080×122103` 会算出
+`72×8192`，技术上"渲染了"，实际一片糊。
+
+合法性由「整数网格 + 单块 64MB」决定，是分段函数，闭式解写不出来。
+改为**二分 60 次**求这段函数上的最大值：
+
+| 页面 | 旧结果 | 新结果 |
+| --- | --- | --- |
+| 1168 × 13657（截图那页） | 拒绝渲染 | **2 块，1:1 全清晰** |
+| 1080 × 122103（崩溃报告） | 拒绝渲染 | 4 块，`290×32768` |
+| 2048 × 409600 | 拒绝渲染 | 4 块，`164×32768` |
+| 16000 × 200 | 拒绝渲染 | 2 块横向切分，1:1 |
+| 50000 × 50000 | 拒绝渲染 | 4 块，`8192×8192` |
+
+关键不变量：**`widthPx/heightPx` 永远等于 PDF 真实宽高比**，即使降级。
+所以标注的归一化坐标零迁移，位置永远对。
+
+其余配套：
+
+- `ReaderViewModel` 缓存从 `Bitmap` 改为 `PageRender`，页数上限 7 → **3**（长页每页最多 4 块）
+- 逐块回调 → 第一块到达就能显示，长页是「从上往下长出来」而不是转很久的圈
+- `PdfReaderPage` 占位高度改用真实比例，不再硬编码 A4 的 1.414（超长页会先占矮框再突然撑高）
+- `PdfFlattener` 导出改走会话 + 逐 tile 贴到同一页，超长页不再中断整本导出
+
+### 二、玻璃：三处方向性错误
+
+用户说"太烂了"。对照 Apple HIG 与 Metal/AGSL 的采样管线
+（折射 → 色散 → 模糊 → 亮度整理 → 边缘高光），旧版这三处是错的：
+
+| # | 问题 | 后果 |
+| --- | --- | --- |
+| 1 | `lens(..., depthEffect, chromaticAberration)` 第 4 参传的是 **`false`** | 色散从未开启，玻璃边缘是纯灰边 —— 这正是「玻璃」与「半透明塑料」最直接的区别 |
+| 2 | 霜化层 **55% 白** | 把折射糊成乳白。Apple 的 `regular` 变体只做 "blur + adjust luminosity"，不大面积盖白 |
+| 3 | `lens(refr*100f, 24f, ...)` | 折射位移 12、折射带 24，采样点被推出控件外，边缘采到背景色 |
+
+新的采样管线：
+
+```kotlin
+lens(height = 14px, amount = 12px, depthEffect = true, chromaticAberration = true)
+blur(22dp)
+colorControls(brightness = 1.06, contrast = 0.94, saturation = 1.35)  // ← "adjusts the luminosity"
+```
+
+配套调整：
+
+- 霜化层 55% → **20%**（深色 35% → 14%），亮度交给 `colorControls` 做
+- 删掉自绘的 `drawTopHighlight()`（一条 40% 高的白色渐变带，效果是"白雾压顶"），
+  边缘高光改用库自带的 `HighlightStyle.Default(intensity, angle, falloff)`
+- `GlassSpec` 参数重命名对齐物理量：`refractionHeightPx` / `refractionAmountPx` /
+  `chromaticAberration` / `brightness` / `contrast` / `saturation` / `highlightAngle` / `highlightFalloff`
+- 删掉死字段 `dispersion` / `maskAlpha` / `highlightHeightRatio` / `allowRefraction`
+
+#### 修掉一个真 bug：规范值从未生效过
+
+`AppSettings.glassBlurDp` 默认 `10f`，而 `toGlassSpec()` 直接拿它覆盖
+`GlassSpec` 的默认值 —— 所以"v1.3.5 把模糊提到 18dp"在真机上**从未生效**。
+更糟的是当时的 `GlassTokensTest` 断言的是 `GlassSpec()` 的默认值，
+测的是运行时根本不会用的数，因此测试全绿、体验照旧。
+
+同时 `intensity = glassBlurDp / 10f` 把「模糊」和「折射」两个不相干的物理量
+强行耦合：用户一调模糊，折射跟着变。现在两者独立。
+
+#### 新增 `GlassContentCard`：内容层不能折射
+
+Apple HIG 原文：
+
+> Don't use Liquid Glass in the content layer.
+> Use Liquid Glass effects sparingly.
+
+内容层的职责是**可读**。折射会让文字边缘跟着底层一起弯曲，长列表滚起来整页都在扭。
+所以把 3 处内容层调用点从 `LiquidGlass` 迁到新的 `GlassContentCard`（纯模糊 + 底色，无折射）：
+
+| 文件 | 组件 |
+| --- | --- |
+| `GlassControls.kt:384` | `GlassGroup` 设置分组 |
+| `GlassFeedback.kt:248` | `GlassStateCard` 状态卡 |
+| `GlassList.kt:118` | 列表行按压反馈 |
+
+其余 26 处都是功能层（底栏、按钮、面板、浮卡），保留折射玻璃。
+
+### 三、测试
+
+**119 项全绿**（原 103 项）。新增 / 重写：
+
+| 文件 | 项数 | 守什么 |
+| --- | --- | --- |
+| `PageTilingTest`（新） | 9 | 每块合法、块间无缝隙无重叠、降级不破宽高比、任何尺寸都不被拒绝 |
+| `RenderSizeLimitTest`（重写） | 11 | 改名断言语义（判断对象是 tile 不是整页），新增「同样页面切块后每块都合法」 |
+| `GlassTokensTest`（重写） | 13 | **断言方向反转**：从锁「厚重」改为锁「像 Apple 玻璃」—— 雾化克制、色散开启、折射像素级、设置项不覆盖规范值 |
+
+两个文件都做了**反向验证**（把旧 bug 注入回去，确认测试确实会红）：
+
+- 把霜化层改回 55%、色散改回 `false`、`glassBlurDp` 改回 10f
+  → `GlassTokensTest` **4 项失败**
+- 把降级改回 `sqrt(单块预算/总像素)` 公式
+  → `PageTilingTest` **3 项失败**
 
 ## 1.4.0 变更
 

@@ -99,38 +99,57 @@ object PdfFlattener {
             return@withContext PdfResult.Failure(PdfError.Corrupted("文档没有可读页面"))
         }
 
+        // v1.5.0：走常驻会话分块渲染。
+        // 旧版每页调一次 renderPage（内部重开文档），而且超长页会直接失败 ——
+        // 只要文档里有一张 CAD 长图，整本导出就中断。
+        val sessionRes = PdfiumEngine.openSession(resolver, sourceUri, password)
+        val session = when (sessionRes) {
+            is PdfResult.Failure -> return@withContext sessionRes
+            is PdfResult.Success -> sessionRes.value
+        }
+
         val pdf = PdfDocument()
         try {
             for (pageIndex in 0 until pageCount) {
                 coroutineContext.ensureActive()
 
-                val rendered = PdfiumEngine.renderPage(
-                    resolver = resolver,
-                    uri = sourceUri,
-                    pageIndex = pageIndex,
-                    targetWidthPx = RENDER_WIDTH,
-                    password = password
-                )
-                val bmp = when (rendered) {
-                    is PdfResult.Failure -> return@withContext rendered
-                    is PdfResult.Success -> rendered.value
+                val planRes = session.plan(pageIndex, RENDER_WIDTH)
+                val plan = when (planRes) {
+                    is PdfResult.Failure -> return@withContext planRes
+                    is PdfResult.Success -> planRes.value
                 }
 
-                // 以点位为页面坐标系；宽高比与底图一致
-                val pageW = bmp.width
-                val pageH = bmp.height
+                // 以分块后的整页尺寸建页；点位与像素 1:1，宽高比即真实比例
+                val pageW = plan.rects.maxOf { it.left + it.width }
+                val pageH = plan.rects.maxOf { it.top + it.height }
                 val info = PdfDocument.PageInfo.Builder(pageW, pageH, pageIndex + 1).create()
                 val page = pdf.startPage(info)
                 val canvas: Canvas = page.canvas
 
-                // 1) 底图铺满整页
-                canvas.drawBitmap(
-                    bmp,
-                    null,
-                    RectF(0f, 0f, pageW.toFloat(), pageH.toFloat()),
-                    Paint(Paint.FILTER_BITMAP_FLAG)
-                )
-                bmp.recycle()
+                // 1) 底图逐块贴到整页对应位置 —— 分块只是渲染手段，
+                //    输出仍是一张完整页面，接缝处由 PdfDocument 的矢量画布天然对齐
+                val tilePaint = Paint(Paint.FILTER_BITMAP_FLAG)
+                var lastError: PdfError? = null
+                val renderRes = session.renderTiles(pageIndex, plan) { tile ->
+                    coroutineContext.ensureActive()
+                    canvas.drawBitmap(
+                        tile.bitmap,
+                        null,
+                        RectF(
+                            tile.left.toFloat(),
+                            tile.top.toFloat(),
+                            (tile.left + tile.width).toFloat(),
+                            (tile.top + tile.height).toFloat()
+                        ),
+                        tilePaint
+                    )
+                    tile.bitmap.recycle()
+                }
+                if (renderRes is PdfResult.Failure) lastError = renderRes.error
+                if (lastError != null) {
+                    runCatching { pdf.finishPage(page) }
+                    return@withContext PdfResult.Failure(lastError)
+                }
 
                 // 2) 叠加该页标注
                 val annots = doc.pages[pageIndex].orEmpty()
@@ -155,6 +174,7 @@ object PdfFlattener {
             PdfResult.Failure(PdfError.Unknown("导出标注失败", t))
         } finally {
             runCatching { pdf.close() }
+            runCatching { session.close() }
         }
     }
 

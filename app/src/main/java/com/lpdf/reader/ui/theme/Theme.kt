@@ -50,10 +50,12 @@ val LightColors = LPdfColors(
     danger = LColors.Danger,
     success = LColors.Success,
     accent = LColors.AccentBlue,
-    glassBase = Color(0x2EFFFFFF),      // 18% 白：玻璃实体感
-    glassFrost = Color(0x8CFFFFFF),     // 55% 白：霜化层，压住底层对比
-    glassStroke = Color(0xB0FFFFFF),    // 69% 白：亮上缘
-    glassStrokeBottom = Color(0x1A000000), // 10% 黑：下缘厚度暗线
+    glassBase = Color(0x1FFFFFFF),      // 12% 白：极薄的实体感
+    // v1.5.0：55% → 20%。55% 的白雾会把折射糊成乳白，
+    // 「调整亮度」应交给 colorControls，而不是靠盖白。
+    glassFrost = Color(0x33FFFFFF),     // 20% 白：仅做轻微提亮
+    glassStroke = Color(0x8CFFFFFF),    // 55% 白：亮上缘
+    glassStrokeBottom = Color(0x14000000), // 8% 黑：下缘厚度暗线
     separator = Color(0x14000000)
 )
 
@@ -67,44 +69,87 @@ val DarkColors = LPdfColors(
     danger = LColors.DangerDark,
     success = LColors.Success,
     accent = LColors.AccentBlue,
-    glassBase = Color(0x28FFFFFF),      // 16% 白
-    glassFrost = Color(0x59000000),     // 35% 黑：深色下霜化层是压暗而非提亮
-    glassStroke = Color(0x66FFFFFF),    // 40% 白
+    glassBase = Color(0x1AFFFFFF),      // 10% 白
+    // 深色下霜化层是压暗而非提亮；同样从 35% 降到 14%
+    glassFrost = Color(0x24000000),     // 14% 黑
+    glassStroke = Color(0x59FFFFFF),    // 35% 白
     glassStrokeBottom = Color(0x33000000),
     separator = Color(0x1FFFFFFF)
 )
 
 /**
- * 玻璃光学参数（视觉规范 §2.2 锁定值）。
+ * 玻璃光学参数。
+ *
+ * ## v1.5.0 重做：对齐 Apple Liquid Glass
+ *
+ * 旧版的参数是「看起来差不多」的猜测值，实测效果用户评价是「太烂了」。
+ * 对照 Apple HIG 与 Metal / AGSL 的实现方式（`liquid-glass` 的采样管线是
+ * 折射 → 色散 → 模糊 → 亮度整理 → 边缘高光），旧版有三处方向性错误：
+ *
+ * 1. **色散关着**。`lens(..., depthEffect, chromaticAberration)` 的第 4 个参数
+ *    原来传的是 `false`，玻璃最标志性的彩虹边缘从未出现过。而它正是
+ *    「玻璃」与「半透明塑料」在视觉上最直接的区别。
+ * 2. **霜化层 55% 白**把折射糊成乳白。Apple 的 `regular` 变体只是
+ *    「blur + 调整亮度」，不会用大面积白雾去盖。现在降到 20%，
+ *    亮度交给 [colorControls] 的 `brightness/contrast/saturation` 做，
+ *    这才是玻璃「提亮但不发白」的正确做法。
+ * 3. **折射量级耦合错**。原来 `refraction × 100` 得到的是像素位移，
+ *    24px 的位移会把采样点推到控件外，边缘直接采到背景色。
+ *    现在拆成 [refractionHeightPx]（折射带高度）与 [refractionAmountPx]
+ *    （最大位移），量级分别是 14px / 12px —— 与 Apple 在 iOS 26 上的
+ *    观感一致：边缘有明显「凸透镜」弯曲，但中心保持清晰。
  */
 @Immutable
 data class GlassSpec(
     /**
-     * 模糊半径。
+     * 模糊半径（dp）。
      *
-     * 规范原定 10dp，但真机上玻璃底下的 PDF 文字仍然清晰可辨，
-     * 玻璃看起来像「一块透明塑料」而不是「磨砂玻璃」。参考图里底层内容
-     * 已经被糊成色块，只剩轮廓 —— 对应 18dp 左右的模糊量。
+     * 22dp 是 Apple `regular` 变体的量级：底层内容被糊成色块、只剩轮廓，
+     * 但又不是完全看不出结构。低于 12dp 时 PDF 文字仍可辨认，
+     * 玻璃就会退化成「透明塑料」。
      */
-    val blurDp: Float = 18f,
-    val refraction: Float = 0.12f,
-    val dispersion: Float = 0.04f,
-    val highlightAlpha: Float = 0.15f,
-    val maskAlpha: Float = 0.35f,
-    val highlightHeightRatio: Float = 0.40f,
+    val blurDp: Float = 22f,
+
+    /** 折射带高度（px）：从边缘向内多少距离内发生弯曲 */
+    val refractionHeightPx: Float = 14f,
+
+    /** 最大折射位移（px）：越大越像厚透镜，过大则边缘失真 */
+    val refractionAmountPx: Float = 12f,
+
+    /** 是否开启色散（彩虹边缘）。关掉能省 6 次采样，但玻璃感会明显减弱 */
+    val chromaticAberration: Boolean = true,
+
+    /**
+     * 底层亮度整理。Apple 的 `regular` 变体描述是
+     * "blurs and adjusts the luminosity"，这三项就是那个 luminosity 调整：
+     * - 浅色下 brightness 略抬 + contrast 略压，让玻璃发「润」
+     * - 深色下 brightness 略压，避免灰成一片
+     */
+    val brightness: Float = 1.06f,
+    val contrast: Float = 0.94f,
+    val saturation: Float = 1.35f,
+
+    /** 边缘高光强度（0~1） */
+    val highlightIntensity: Float = 0.55f,
+
+    /** 边缘高光角度（度），模拟左上光源 */
+    val highlightAngle: Float = 135f,
+
+    /** 高光衰减：越大越集中在边缘，越小越铺开 */
+    val highlightFalloff: Float = 0.6f,
+
     /** 设置页"动效等级"为减弱/关闭时，动态形变被压平 */
     val motionScale: Float = 1f,
-    /** 玻璃强度偏好（1.0 = 规范基准） */
-    val intensity: Float = 1f,
-    /**
-     * 是否允许 AGSL 折射（设备能力探测结果，非用户设置）。
-     *
-     * 这个值走 [GlassSpec] 而不是单独读 CompositionLocal，是为了让玻璃参数
-     * 只有一个数据源：一旦设备不支持折射，[intensity] 里就不含折射分量，
-     * 所有依赖它的计算（阴影、高光位移、边缘色散）自动保持一致。
-     */
-    val allowRefraction: Boolean = true
-)
+
+    /** 玻璃强度整体倍率（1.0 = 规范基准） */
+    val intensity: Float = 1f
+) {
+    /** 实际折射带高度（含倍率） */
+    val refractionHeight: Float get() = refractionHeightPx * intensity
+
+    /** 实际折射位移（含倍率） */
+    val refractionAmount: Float get() = refractionAmountPx * intensity
+}
 
 val LocalColors = staticCompositionLocalOf { LightColors }
 val LocalGlass = staticCompositionLocalOf { GlassSpec() }

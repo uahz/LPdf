@@ -41,20 +41,41 @@ import com.kyant.backdrop.backdrops.LayerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
+import com.kyant.backdrop.effects.colorControls
 import com.kyant.backdrop.effects.lens
 import com.lpdf.reader.ui.theme.LocalColors
 import com.lpdf.reader.ui.theme.LocalGlass
 
 /**
- * 液态玻璃容器 —— 项目内所有玻璃组件的唯一入口。
+ * 液态玻璃容器 —— 项目内所有**功能层**玻璃的唯一入口。
  *
- * 实现要点（对应《视觉规范 §2.1 渲染管线》）：
- * 1. 由 [LiquidGlassScope] 捕获内容层（L1+L2）的 GraphicsLayer，作为采样源
- * 2. 通过 Kyant0 AndroidLiquidGlass 的 [drawBackdrop] 在 GPU 上执行 AGSL：
- *    透镜位移（lens）→ 模糊（blur）→ 高光（highlight）→ 阴影/内阴影
- * 3. 叠加玻璃本底、边缘描边与顶部流动高光带
+ * ## v1.5.0 重做：对齐 Apple Liquid Glass
  *
- * 严禁用「半透明色块 + 高斯模糊贴图」冒充玻璃。
+ * 采样管线与 Apple 的实现顺序一致：
+ *
+ * ```
+ * ① lens()          边缘折射 + 色散（彩虹边）← 玻璃的核心特征
+ * ② blur()          高斯模糊，把底层糊成色块
+ * ③ colorControls() 亮度 / 对比 / 饱和整理 ← Apple 说的 "adjusts the luminosity"
+ * ```
+ *
+ * 三处关键修正（旧版为什么"太烂"）：
+ *
+ * 1. **色散原来传的是 `false`**。`lens(scope, height, amount, depth, chroma)`
+ *    第 4 个参数就是色散开关，关着的时候玻璃边缘是纯灰边，
+ *    少了最标志性的彩虹折射 —— 这是"玻璃"与"半透明塑料"最直接的区别。
+ * 2. **折射量级错了**。旧代码 `lens(refr * 100f, 24f, ...)` 把 0.12 放大成
+ *    12 的位移量、24 的折射带高度，采样点直接被推到控件外，边缘采到背景色。
+ *    现在是 (14px 折射带, 12px 位移) —— 边缘明显弯曲、中心保持清晰。
+ * 3. **霜化层 55% 白把折射糊没了**。现在降到 20%，亮度交给
+ *    `colorControls` 做，玻璃"提亮但不发白"。
+ *
+ * ## 严禁
+ *
+ * - 用「半透明色块 + 静态高斯模糊贴图」冒充玻璃
+ * - 在内容层（列表行、设置分组、状态卡）使用本组件 ——
+ *   Apple HIG 明确要求 "Don't use Liquid Glass in the content layer"，
+ *   内容层请用 [GlassContentCard]
  */
 @Composable
 fun LiquidGlass(
@@ -62,19 +83,19 @@ fun LiquidGlass(
     shape: Shape = Shapes2.XL,
     /** 采样源；为 null 时自动使用最近的 [LiquidGlassScope] */
     backdrop: LayerBackdrop? = null,
-    /** 折射强度，null 取全局规范值 0.12 */
+    /** 折射强度倍率，null 取全局规范值。0 = 关掉折射只留模糊 */
     refraction: Float? = null,
-    /** 模糊半径，null 取设置值 */
+    /** 模糊半径，null 取规范值 */
     blur: Dp? = null,
-    /** 高亮色（实时采样底层内容得到），null 关闭高亮染色 */
+    /** 高亮染色（实时采样底层内容得到），null 关闭染色 */
     highlightColor: Color? = null,
     /** 高亮染色透明度 */
     highlightTint: Float = 0.12f,
-    /** 是否绘制顶部高光带 */
+    /** 是否绘制边缘高光 */
     showHighlight: Boolean = true,
     /** 拖拽时的高光偏移（px），让光"跟着手走" */
     highlightOffset: Offset = Offset.Zero,
-    /** 按压态：折射增强、缩放由调用方处理 */
+    /** 按压态：折射增强、高光更亮 */
     pressed: Boolean = false,
     content: @Composable BoxScope.() -> Unit
 ) {
@@ -82,14 +103,18 @@ fun LiquidGlass(
     val spec = LocalGlass.current
     val colors = LocalColors.current
     val source = backdrop ?: scope?.backdrop
-    val density = LocalDensity.current
-    // 设备能力：AGSL 不可用时自动退化为模糊玻璃，而不是崩掉
     val capability = LocalGlassCapability.current
     val level = capability.level
 
-    val refr = (refraction ?: spec.refraction) * if (pressed) 1.2f else 1f
+    val intensity = if (pressed) 1.25f else 1f
+    val amountScale = refraction ?: 1f
+    val refrHeight = spec.refractionHeight * intensity
+    val refrAmount = spec.refractionAmount * intensity * amountScale
     val blurDp = blur ?: spec.blurDp.dp
-    val highlightAlpha = spec.highlightAlpha * (if (pressed) 1.45f else 1f)
+
+    // 浅色 / 深色下亮度整理方向相反：浅色提亮、深色压暗（见 GlassSpec 注释）
+    val bright = if (colors.isDark) spec.brightness - 0.12f else spec.brightness
+    val contrast = if (colors.isDark) 1.06f else spec.contrast
 
     val base = Modifier
         .clip(shape)
@@ -99,58 +124,67 @@ fun LiquidGlass(
                     backdrop = source,
                     shape = { shape },
                     effects = {
-                        // 三级降级：
-                        //  FULL      → lens（AGSL 折射）+ blur
-                        //  BLUR_ONLY → 跳过 lens，保留 blur/highlight
-                        //  PLAIN     → 不进入本分支
-                        // 每个效果单独 try/catch：某些 ROM 的 lens 会在 updateEffects
-                        // 里抛 UnsupportedOperationException，一旦冒到绘制循环就是闪退。
-                        if (level == GlassLevel.FULL) {
+                        // ① 折射 + 色散。
+                        //    refractive 开关以 amount > 0 为准：设置里把折射调到 0
+                        //    就真的只留模糊，不会残留一点弯曲。
+                        if (level == GlassLevel.FULL && refrAmount > 0.5f) {
                             runCatching {
-                                lens(refr * 100f * spec.intensity, 24f * spec.intensity, true, false)
+                                lens(
+                                    refrHeight,
+                                    refrAmount,
+                                    /* depthEffect = */ true,
+                                    /* chromaticAberration = */ spec.chromaticAberration
+                                )
                             }.onFailure {
                                 capability.degrade()   // FULL → BLUR_ONLY
                                 GlassLog.warn("lens", it)
                             }
                         }
+                        // ② 模糊
                         if (level != GlassLevel.PLAIN) {
                             runCatching { blur(blurDp.toPx()) }
                                 .onFailure {
                                     capability.degrade()   // → PLAIN
                                     GlassLog.warn("blur", it)
                                 }
+                            // ③ 亮度整理：这是 Apple 说的 "adjusts the luminosity"。
+                            //    只靠霜化层盖白会发灰，靠 colorControls 才是玻璃的润泽感。
+                            runCatching { colorControls(bright, contrast, spec.saturation) }
+                                .onFailure { GlassLog.warn("colorControls", it) }
                         }
                     },
-                    highlight = {
-                        com.kyant.backdrop.highlight.Highlight(
-                            width = 2.dp,
-                            blurRadius = 8.dp,
-                            alpha = highlightAlpha
-                        )
-                    }
+                    // 边缘高光：改用库自带的 HighlightStyle.Default。
+                    // 旧版自己用 drawBehind 画一条 40% 高的白色渐变带，
+                    // 结果是「一片白雾压在顶部」，不是玻璃边缘的菲涅尔亮边。
+                    highlight = if (showHighlight) {
+                        {
+                            com.kyant.backdrop.highlight.Highlight(
+                                width = 1.5.dp,
+                                blurRadius = 6.dp,
+                                alpha = (spec.highlightIntensity * intensity)
+                                    .coerceIn(0f, 1f),
+                                style = com.kyant.backdrop.highlight.HighlightStyle.Default(
+                                    intensity = (spec.highlightIntensity * intensity)
+                                        .coerceIn(0f, 1f),
+                                    angle = spec.highlightAngle,
+                                    falloff = spec.highlightFalloff
+                                )
+                            )
+                        }
+                    } else null
                 )
             } else {
-                // 兜底：无法采样时退化为半透明底，绝不使用静态模糊假玻璃
+                // 兜底：无法采样时退化为半透明底，绝不用静态模糊假玻璃
                 Modifier
             }
         )
-        // 玻璃本底 + 霜化层
+        // 玻璃本底 + 极薄霜化层。
         //
-        // 只画 glassBase（半透明白）是不够的：底下的 PDF 文字会原样透上来，
-        // 图标和正文糊成一片，用户反馈「底栏太透明看不清东西」。
-        // 真实玻璃有两个成分：
-        //   1. 折射/模糊后的底层影像（由 drawBackdrop 提供）
-        //   2. 一层乳白霜化，抬高亮度、压低对比
-        // 少了第 2 层就是「透明塑料」，不是玻璃。
+        // v1.5.0：霜化层从 55% 降到 20%。它的职责只是「不让 PDF 正文原样透上来」，
+        // 不再是「靠盖白营造磨砂感」—— 那件事由 blur + colorControls 完成。
         .drawBehind {
-            if (level == GlassLevel.PLAIN) {
-                // PLAIN：连 backdrop 都没有，霜化层要更重，否则根本挡不住底层。
-                drawRect(colors.glassFrost)
-                drawRect(colors.glassBase)
-            } else {
-                drawRect(colors.glassFrost)
-                drawRect(colors.glassBase)
-            }
+            drawRect(colors.glassFrost)
+            drawRect(colors.glassBase)
         }
         .then(
             if (highlightColor != null) {
@@ -167,66 +201,65 @@ fun LiquidGlass(
             } else Modifier
         )
         .drawBehind {
-            // 顶部流动高光带
+            // 只保留一圈极细的边缘线（厚度感），不再画顶白雾。
             if (showHighlight) {
-                drawTopHighlight(highlightOffset, highlightAlpha, size)
+                drawGlassEdge(shape, colors.glassStroke, colors.glassStrokeBottom)
             }
-            // 边缘立体感：上缘亮线 + 下缘暗线。
-            // 只有一圈均匀描边时玻璃看起来是「贴纸」；参考图的边缘有明显
-            // 明暗差，像一块有厚度的玻璃砖。
-            drawGlassEdge(shape, colors.glassStroke, colors.glassStrokeBottom)
         }
 
     Box(modifier = base, content = content)
 }
 
-/** 顶部高光带：上边缘 40% 高度内从白色渐变到透明，并随 [offset] 轻微位移 */
-private fun DrawScope.drawTopHighlight(offset: Offset, alpha: Float, size: Size) {
-    val h = size.height * 0.40f
-    val start = Offset(offset.x * 0.06f, offset.y * 0.02f)
-    drawRect(
-        brush = Brush.verticalGradient(
-            colors = listOf(Color.White.copy(alpha = alpha), Color.Transparent),
-            startY = start.y,
-            endY = start.y + h
-        ),
-        topLeft = Offset(0f, 0f),
-        size = Size(size.width, h)
-    )
-    // 左上角斜向扫描光，增强"玻璃砖"的实感
-    drawRect(
-        brush = Brush.linearGradient(
-            colors = listOf(Color.White.copy(alpha = alpha * 0.55f), Color.Transparent),
-            start = Offset(size.width * 0.05f + start.x, 0f),
-            end = Offset(size.width * 0.55f + start.x, size.height * 0.5f)
-        ),
-        size = Size(size.width, size.height * 0.5f)
-    )
-}
+/**
+ * 内容层卡片材质（v1.5.0 新增）。
+ *
+ * ## 为什么不能对内容层用折射玻璃
+ *
+ * Apple HIG 在 Liquid Glass 页面写得很明确：
+ *
+ * > Don't use Liquid Glass in the content layer.
+ * > Use Liquid Glass effects sparingly.
+ *
+ * 内容层的职责是**可读**。折射会让文字边缘跟着底层一起弯曲，
+ * 长列表滚起来还会让整页都在扭动 —— 视觉噪音极大。
+ * 内容层该用的是 standard material：半透明底 + 模糊 + 描边，没有折射。
+ *
+ * 所以列表行、设置分组、状态卡这类「承载信息」的容器统一走这里。
+ */
+@Composable
+fun GlassContentCard(
+    modifier: Modifier = Modifier,
+    shape: Shape = Shapes2.L,
+    /** 磨砂强度：内容层比功能层轻，避免遮挡信息 */
+    blur: Dp = 12.dp,
+    content: @Composable BoxScope.() -> Unit
+) {
+    val colors = LocalColors.current
+    val capability = LocalGlassCapability.current
+    val scope = LocalLiquidGlassScope.current
+    val source = scope?.backdrop
 
-/** 按形状绘制 1dp 描边（直接使用 DrawScope 的描边绘制，避免 Canvas 兼容问题） */
-private fun DrawScope.drawOutlineStroke(shape: Shape, color: Color) {
-    val stroke = Stroke(width = 1.dp.toPx())
-    // DrawScope 自身即 Density，可直接用于生成轮廓
-    val outline = shape.createOutline(size, layoutDirection, this)
-    when (outline) {
-        is androidx.compose.ui.graphics.Outline.Generic ->
-            drawPath(outline.path, color = color, style = stroke)
-
-        is androidx.compose.ui.graphics.Outline.Rounded -> {
-            val rr: RoundRect = outline.roundRect
-            drawRoundRect(
-                color = color,
-                topLeft = Offset(rr.left, rr.top),
-                size = Size(rr.width, rr.height),
-                cornerRadius = CornerRadius(rr.topLeftCornerRadius.x, rr.topLeftCornerRadius.y),
-                style = stroke
-            )
+    val base = Modifier
+        .clip(shape)
+        .then(
+            if (source != null && capability.level != GlassLevel.PLAIN) {
+                Modifier.drawBackdrop(
+                    backdrop = source,
+                    shape = { shape },
+                    // 只有模糊，没有 lens —— 这是内容层与功能层的关键区别
+                    effects = {
+                        runCatching { blur(blur.toPx()) }
+                            .onFailure { GlassLog.warn("contentBlur", it) }
+                    }
+                )
+            } else Modifier
+        )
+        .drawBehind {
+            // 内容层底色更实一点，保证文字对比度
+            drawRect(colors.glassFrost.copy(alpha = if (colors.isDark) 0.55f else 0.45f))
         }
 
-        is androidx.compose.ui.graphics.Outline.Rectangle ->
-            drawRect(color = color, topLeft = Offset.Zero, size = size, style = stroke)
-    }
+    Box(modifier = base, content = content)
 }
 
 /**

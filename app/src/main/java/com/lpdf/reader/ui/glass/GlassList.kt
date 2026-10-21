@@ -115,7 +115,13 @@ fun GlassListRow(
             .longPress(onLongClick)
     ) {
         if (pressed) {
-            LiquidGlass(Modifier.matchParentSize(), shape = shape, showHighlight = true) {}
+            // v1.5.0：列表行是内容层，按压反馈用标准材质即可。
+            // 用折射玻璃会让按下的瞬间整行文字一起扭曲，观感是「画面在抖」。
+            GlassContentCard(
+                Modifier.matchParentSize(),
+                shape = shape,
+                blur = 8.dp
+            ) {}
         }
         Row(
             Modifier

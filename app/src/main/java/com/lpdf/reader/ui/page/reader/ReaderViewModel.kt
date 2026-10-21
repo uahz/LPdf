@@ -12,8 +12,11 @@ import com.lpdf.reader.data.local.AnnotationDoc
 import com.lpdf.reader.data.local.Bookmark
 import com.lpdf.reader.data.local.SignatureAsset
 import com.lpdf.reader.data.local.ReadingMode
+import com.lpdf.reader.data.pdf.PageRender
 import com.lpdf.reader.data.pdf.PdfFlattener
 import com.lpdf.reader.data.pdf.PdfiumEngine
+import com.lpdf.reader.data.pdf.Tile
+import com.lpdf.reader.data.pdf.TilePlan
 import com.lpdf.reader.ui.glass.GlassToast
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -81,25 +84,35 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
     val state: StateFlow<ReaderUiState> = _state.asStateFlow()
 
     /**
-     * 已渲染页缓存：pageIndex -> Bitmap。
+     * 已渲染页缓存：pageIndex -> [PageRender]（v1.5.0 起是一组 tile）。
      *
-     * 淘汰按「页数」和「字节数」双条件。
+     * ## 为什么从 Bitmap 换成 PageRender
      *
-     * v1.3.3 之前只看页数（7 页）。一旦遇到大幅面页面（A3 图纸、
-     * 2000dpi 扫描件），单页位图可达 30~160MB，7 页就是 1GB+，
-     * 表现是「翻几页就闪退」或整机卡死。
+     * GPU 单边纹理上限 8192，PDF 里的超长页（CAD 图、海报、地图导出）
+     * 按屏幕宽缩放后高度动辄上万，整页塞一张位图在物理上不可能。
+     * 现在一页 = 若干块，每块独立满足纹理上限，绘制时在同一个 Canvas 里拼。
+     *
+     * ## 淘汰策略
+     *
+     * 双条件：**页数** 与 **字节数**，谁先超谁触发淘汰。
+     *
+     * 页数上限从 7 降到 3：长页每页最多 4 块，7 页 × 4 块 = 28 块，
+     * 最坏情况 28 × 64MB 直接把 heap 打穿。3 页（当前 + 前后各 1）正好
+     * 覆盖懒加载窗口，再多的页面也算不到收益。
      *
      * 字节上限取 heap 的 1/4：既给 Bitmap 留足空间，又不至于把
      * 应用逼到 GC 抖动的边缘。
      */
-    private val pageCache = object : LinkedHashMap<Int, android.graphics.Bitmap>(8, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, android.graphics.Bitmap>?): Boolean {
+    private val pageCache = object : LinkedHashMap<Int, PageRender>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, PageRender>?): Boolean {
             if (size <= 1) return false
             val overCount = size > CACHE_LIMIT
             val overBytes = cachedBytes > CACHE_MAX_BYTES
             if (overCount || overBytes) {
-                eldest?.value?.recycle()
-                cachedBytes -= eldest?.value?.allocationByteCount?.toLong() ?: 0L
+                eldest?.value?.let { r ->
+                    r.tiles.forEach { t -> runCatching { t.bitmap.recycle() } }
+                    cachedBytes -= r.bytes
+                }
                 return true
             }
             return false
@@ -118,22 +131,57 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
         (heap / 4).coerceIn(32L * 1024 * 1024, 192L * 1024 * 1024)
     }
 
-    /** 插入缓存并维护字节计数 */
-    private fun putPage(page: Int, bmp: android.graphics.Bitmap) {
+    /** 插入/覆盖缓存并维护字节计数 */
+    private fun putRender(r: PageRender) {
         synchronized(pageCache) {
-            pageCache.remove(page)?.let {
-                cachedBytes -= it.allocationByteCount.toLong()
-                it.recycle()
+            pageCache.remove(r.page)?.let { old ->
+                old.tiles.forEach { t -> runCatching { t.bitmap.recycle() } }
+                cachedBytes -= old.bytes
             }
-            pageCache[page] = bmp
-            cachedBytes += bmp.allocationByteCount.toLong()
+            pageCache[r.page] = r
+            cachedBytes += r.bytes
+        }
+    }
+
+    /**
+     * 合并一块新渲染的 tile 进缓存。
+     *
+     * 逐块回调的价值在这里：4 块的长页不必等 4 块全好，
+     * 第一块一到就能显示，用户看到的是「页面从上往下长出来」，
+     * 而不是一个转很久的圈。
+     */
+    private fun appendTile(page: Int, tile: Tile, plan: TilePlan) {
+        synchronized(pageCache) {
+            val cur = pageCache[page]
+            val updated = if (cur == null) {
+                PageRender(
+                    page = page,
+                    widthPx = plan.widthPx,
+                    heightPx = plan.heightPx,
+                    degraded = plan.degraded,
+                    tiles = listOf(tile),
+                    tileCount = plan.tileCount
+                )
+            } else {
+                // 同 index 的旧块（重复渲染）先回收，避免泄漏
+                val merged = cur.tiles.filterNot { it.index == tile.index } + tile
+                cur.copy(
+                    tiles = merged.sortedBy { it.index },
+                    tileCount = plan.tileCount,
+                    degraded = plan.degraded
+                )
+            }
+            // 先扣掉旧页占用再覆盖，否则字节计数会重复累加
+            cur?.let { cachedBytes -= it.bytes }
+            pageCache[page] = updated
+            cachedBytes += updated.bytes
         }
     }
 
     /** 清空缓存并回收全部位图（切换文档时调用） */
     private fun clearPageCache() {
         synchronized(pageCache) {
-            pageCache.values.forEach { runCatching { it.recycle() } }
+            pageCache.values.forEach { r -> r.tiles.forEach { t -> runCatching { t.bitmap.recycle() } } }
             pageCache.clear()
             cachedBytes = 0L
         }
@@ -231,35 +279,81 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
     // ---------------------------------------------------------------- 渲染
 
-    fun bitmapFor(page: Int): android.graphics.Bitmap? {
+    /** 已渲染的页（可能只到了一部分 tile）；无则 null */
+    fun renderFor(page: Int): PageRender? {
         synchronized(pageCache) { return pageCache[page] }
     }
 
-    /** 预渲染指定页；宽度为屏幕像素宽 */
     /**
-     * 确保某页已渲染。
+     * 确保某页已完整渲染（v1.5.0 分块版）。
      *
-     * 走常驻会话：渲染只做 `openPage` + `render`，不再重开文档。
-     * 会话还不可用（正在打开）时直接返回，调用方下一帧会重试 ——
-     * 原来这里会 fallback 到一次性 renderPage，等于又开一遍文档。
+     * 走常驻会话：先 `plan` 拿几何（顺带知道真实宽高比与要切几块），
+     * 再 `renderTiles` 逐块回调。每块到达就写进缓存并触发一次重组，
+     * 所以 UI 上看到的是逐块出现，而不是「大页永远转圈」。
+     *
+     * 会话还不可用（正在打开）时直接返回，调用方下一帧会重试。
      */
     suspend fun ensureRendered(page: Int, widthPx: Int) {
         if (page < 0 || page >= _state.value.pageCount) return
-        synchronized(pageCache) { if (pageCache.containsKey(page)) return }
+        synchronized(pageCache) { if (pageCache[page]?.isComplete == true) return }
         // 已经失败过的页不要反复重试：PDFium 对同一页的失败是确定性的，
         // 重试只会白白占着渲染锁，让其它页排不上队。
         synchronized(renderErrors) { if (renderErrors.containsKey(page)) return }
         val session = sessionRef ?: return
-        val res = session.render(page, widthPx)
-        if (res is PdfResult.Failure) {
-            synchronized(renderErrors) { renderErrors[page] = res.error.message ?: "页面渲染失败" }
+
+        // ① 几何：拿到真实宽高比 + 分块方案
+        val planRes = session.plan(page, widthPx)
+        if (planRes is PdfResult.Failure) {
+            synchronized(renderErrors) {
+                renderErrors[page] = planRes.error.message ?: "页面尺寸读取失败"
+            }
             return
         }
-        val bmp = res.getOrNull() ?: return
+        val plan = planRes.getOrNull() ?: return
+
+        // ② 先把「占位页」放进缓存：UI 立刻拿到真实宽高比，
+        //    列表不会再从 A4 比例跳到真实比例（那种跳动比转圈更让人困惑）
+        synchronized(pageCache) {
+            val cur = pageCache[page]
+            if (cur == null || cur.tiles.isEmpty()) {
+                putRender(
+                    PageRender(
+                        page = page,
+                        widthPx = plan.widthPx,
+                        heightPx = plan.heightPx,
+                        degraded = plan.degraded,
+                        tiles = emptyList(),
+                        tileCount = plan.tileCount
+                    )
+                )
+            }
+        }
         withContext(AppDispatchers.main) {
-            putPage(page, bmp)
-            // 触发重组
             _state.value = _state.value.copy(zoom = _state.value.zoom)
+        }
+
+        // ③ 逐块渲染
+        var firstFailure: String? = null
+        val res = session.renderTiles(page, plan) { tile ->
+            if (firstFailure == null) {
+                withContext(AppDispatchers.main) {
+                    appendTile(page, tile, plan)
+                    _state.value = _state.value.copy(zoom = _state.value.zoom)
+                }
+            }
+        }
+        if (res is PdfResult.Failure) {
+            firstFailure = res.error.message ?: "页面渲染失败"
+        }
+        if (firstFailure != null) {
+            // 一块都没成功才算失败；已渲染的部分保留，用户至少能看上半页
+            val any = synchronized(pageCache) { pageCache[page]?.tiles?.isNotEmpty() == true }
+            if (!any) {
+                synchronized(renderErrors) { renderErrors[page] = firstFailure!! }
+                withContext(AppDispatchers.main) {
+                    _state.value = _state.value.copy(zoom = _state.value.zoom)
+                }
+            }
         }
     }
 
@@ -715,7 +809,14 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     companion object {
-        private const val CACHE_LIMIT = 7
+        /**
+         * 缓存页数上限。
+         *
+         * v1.5.0 从 7 降到 3：分块后一页最多 4 块位图，
+         * 7 页 × 4 块 × 64MB 的极端情况会直接把 heap 打穿。
+         * 3 页（当前 + 前后各 1）刚好覆盖懒加载窗口。
+         */
+        private const val CACHE_LIMIT = 3
         fun newId(): String = UUID.randomUUID().toString()
     }
 }

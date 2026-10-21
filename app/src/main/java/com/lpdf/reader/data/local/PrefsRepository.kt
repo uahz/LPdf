@@ -46,7 +46,7 @@ data class AppSettings(
     val hapticFeedback: Boolean = true,
     // 外观
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    val glassBlurDp: Float = 10f,
+    val glassBlurDp: Float = 22f,
     val glassRefraction: Float = 0.12f,
     val motionLevel: MotionLevel = MotionLevel.FULL,
     val accentFromContent: Boolean = true,
@@ -67,20 +67,33 @@ data class AppSettings(
     val sortOrder: SortOrder = SortOrder.MODIFIED_DESC,
     val listFilter: ListFilter = ListFilter.ALL
 ) {
-    /** 把设置映射为玻璃光学参数 */
-    fun toGlassSpec(): GlassSpec = GlassSpec(
-        blurDp = glassBlurDp,
-        refraction = glassRefraction,
-        dispersion = 0.04f,
-        highlightAlpha = 0.15f,
-        maskAlpha = 0.35f,
-        motionScale = when (motionLevel) {
-            MotionLevel.FULL -> 1f
-            MotionLevel.REDUCED -> 0.4f
-            MotionLevel.OFF -> 0f
-        },
-        intensity = (glassBlurDp / 10f).coerceIn(0.4f, 2f)
-    )
+    /**
+     * 把设置映射为玻璃光学参数。
+     *
+     * ## v1.5.0 修掉的数据源漂移
+     *
+     * 旧版这里把 `intensity` 算成 `glassBlurDp / 10f` —— 把「模糊」和
+     * 「折射」两个完全不相干的物理量强行耦合。结果是用户一调模糊，
+     * 折射也跟着变；而 `GlassSpec` 里精心定的默认值（当时是 18dp）
+     * 被 `AppSettings` 的默认值 10f 完全覆盖，**从未生效过**。
+     *
+     * 现在两者独立：
+     * - `blurDp` 直接取用户设置（默认已改为 22f）
+     * - `intensity` 只跟折射强度设置挂钩，1.0 = 规范基准
+     */
+    fun toGlassSpec(): GlassSpec {
+        val base = GlassSpec()
+        return base.copy(
+            blurDp = glassBlurDp,
+            // 用户可调 0~0.30，规范基准 0.12 → 倍率 0~2.5
+            intensity = (glassRefraction / 0.12f).coerceIn(0f, 2.5f),
+            motionScale = when (motionLevel) {
+                MotionLevel.FULL -> 1f
+                MotionLevel.REDUCED -> 0.4f
+                MotionLevel.OFF -> 0f
+            }
+        )
+    }
 }
 
 /**
@@ -164,7 +177,7 @@ class PrefsRepository(private val context: Context) {
         hapticFeedback = this[Keys.haptic] ?: true,
         themeMode = this[Keys.themeMode]?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
             ?: ThemeMode.SYSTEM,
-        glassBlurDp = (this[Keys.glassBlur] ?: 10).toFloat(),
+        glassBlurDp = (this[Keys.glassBlur] ?: 22).toFloat(),
         glassRefraction = (this[Keys.glassRefraction] ?: 12) / 100f,
         motionLevel = this[Keys.motionLevel]?.let { runCatching { MotionLevel.valueOf(it) }.getOrNull() }
             ?: MotionLevel.FULL,
