@@ -157,6 +157,13 @@ fun PdfListPage(
         vm.scan()
     }
 
+    // 上次若崩溃过，首屏把堆栈摆出来：这是目前唯一能把「打开闪退」变成可排查信息的通道
+    var crashReport by remember {
+        mutableStateOf(
+            runCatching { com.lpdf.reader.core.util.CrashReporter.read(context) }.getOrNull()
+        )
+    }
+
     fun openItem(item: PdfItem) = vm.requestOpen(item) { it2, _ ->
         onOpenReader(it2.uri, it2.displayName)
     }
@@ -377,6 +384,25 @@ fun PdfListPage(
                         vm.submitPassword(pwd) { it2, _ -> onOpenReader(it2.uri, it2.displayName) }
                     },
                     onDismiss = vm::dismissPassword
+                )
+            }
+
+            // 上次崩溃报告
+            crashReport?.let { report ->
+                com.lpdf.reader.ui.glass.CrashReportSheet(
+                    report = report,
+                    onCopy = {
+                        runCatching {
+                            val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                as android.content.ClipboardManager
+                            cm.setPrimaryClip(android.content.ClipData.newPlainText("LPdf 崩溃日志", report))
+                        }
+                        vm.toast("已复制，粘贴发出来即可")
+                    },
+                    onDismiss = {
+                        com.lpdf.reader.core.util.CrashReporter.clear(context)
+                        crashReport = null
+                    }
                 )
             }
 

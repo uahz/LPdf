@@ -34,13 +34,33 @@ object PdfiumEngine {
     @Volatile
     private var appContext: Context? = null
 
+    /**
+     * 只创建一次。PdfiumCore 的构造会触发 System.loadLibrary，
+     * 每次 new 都重新走一遍加载路径毫无必要，且会让 native 异常反复抛。
+     */
+    @Volatile
+    private var coreInstance: PdfiumCore? = null
+
+    /** native 库是否可用。加载失败时置 false，上层据此给出可读提示而不是崩溃。 */
+    @Volatile
+    var nativeAvailable: Boolean = true
+        private set
+
     fun init(context: Context) {
         appContext = context.applicationContext
     }
 
     private fun core(): PdfiumCore {
+        coreInstance?.let { return it }
         val ctx = appContext ?: throw PdfError.Unknown("渲染内核未初始化")
-        return PdfiumCore(ctx)
+        return try {
+            PdfiumCore(ctx).also { coreInstance = it }
+        } catch (t: Throwable) {
+            // UnsatisfiedLinkError / NoClassDefFoundError 都属于这里：
+            // ABI 不匹配或 so 未打进包时才会发生
+            nativeAvailable = false
+            throw PdfError.Unknown("PDF 引擎加载失败：${t.javaClass.simpleName}")
+        }
     }
 
     /** 打开文档并返回页数。password 为空表示不加密。 */

@@ -3,6 +3,7 @@ package com.lpdf.reader
 import android.app.Application
 import android.content.Context
 import com.lpdf.reader.core.di.AppDispatchers
+import com.lpdf.reader.core.util.CrashReporter
 import com.lpdf.reader.data.local.AnnotationStore
 import com.lpdf.reader.data.local.BookmarkStore
 import com.lpdf.reader.data.local.MediaStoreSource
@@ -27,11 +28,16 @@ class LpdfApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // 第一件事：装崩溃留痕。放在任何初始化之前，晚一行就可能漏掉启动崩溃。
+        runCatching { CrashReporter.install(this) }
+
         PdfiumEngine.init(this)
         container = AppContainer(this)
-        // 启动时清理过期导入缓存（>7 天），不阻塞主线程
+
+        // 启动清理属于「锦上添花」，绝不能因为它挂掉整个应用：
+        // 早期版本这里是无保护的 launch，一次磁盘异常就会表现为「打开即闪退」。
         CoroutineScope(SupervisorJob() + AppDispatchers.io).launch {
-            container.linkImporter.cleanOldImports()
+            runCatching { container.linkImporter.cleanOldImports() }
         }
     }
 }

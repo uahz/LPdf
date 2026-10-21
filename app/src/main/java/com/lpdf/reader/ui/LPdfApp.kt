@@ -45,7 +45,9 @@ object Routes {
 fun LPdfApp(
     container: AppContainer,
     settingsFlow: StateFlow<AppSettings>,
-    navController: NavHostController = rememberNavController()
+    navController: NavHostController = rememberNavController(),
+    /** 界面层致命异常回调：由 Activity 展示错误页，避免用户看到空白屏 */
+    onFatal: (Throwable) -> Unit = {}
 ) {
     val settings by settingsFlow.collectAsStateWithLifecycle()
     val dark = when (settings.themeMode) {
