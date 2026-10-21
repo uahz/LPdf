@@ -540,10 +540,29 @@ private fun PageItem(
     }
     val areaWidthPx = (widthPx - bounds.padH * 2).toInt().coerceAtLeast(240)
     var bitmap by remember(page) { mutableStateOf<Bitmap?>(vm.bitmapFor(page)) }
+    // 渲染失败时记下原因，避免「一直转圈却不说是错」
+    var failure by remember(page) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(page, areaWidthPx) {
-        vm.ensureRendered(page, areaWidthPx)
-        bitmap = vm.bitmapFor(page)
+        var attempts = 0
+        // 会话可能还在打开中（ensureRendered 里 session 为 null 会直接返回）。
+        // 轮询等它就绪，但**必须有上限** —— 原来没有上限，一旦渲染永远失败，
+        // 这个圆环就永远转下去，用户看到的就是「打开 PDF 一直转圈」。
+        while (bitmap == null && attempts < MAX_RENDER_RETRY) {
+            attempts++
+            vm.ensureRendered(page, areaWidthPx)
+            bitmap = vm.bitmapFor(page)
+            if (bitmap != null) break
+            val err = vm.lastRenderError(page)
+            if (err != null) {
+                failure = err
+                break
+            }
+            kotlinx.coroutines.delay(if (attempts < 3) 120L else 400L)
+        }
+        if (bitmap == null && failure == null) {
+            failure = "页面渲染超时，可尝试切换页面或重新打开文档"
+        }
     }
 
     Box(
@@ -558,9 +577,29 @@ private fun PageItem(
                 Modifier
                     .fillMaxWidth()
                     .height((areaWidthPx * 1.414f).dp / 1f / LocalDensity.current.density)
-                    .background(Color.White.copy(alpha = 0.92f)),
+                    .background(Color.White.copy(alpha = 0.98f)),
                 contentAlignment = Alignment.Center
-            ) { GlassProgressRing() }
+            ) {
+                if (failure != null) {
+                    // 失败态：不再转圈，明确告诉用户发生了什么
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        LIconView(
+                            LIcon.Broken,
+                            size = 28.dp,
+                            color = LocalColors.current.secondary,
+                            strokeWidth = 1.5.dp
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            failure!!,
+                            style = LType.Micro,
+                            color = LocalColors.current.secondary
+                        )
+                    }
+                } else {
+                    GlassProgressRing()
+                }
+            }
         } else {
             AnnotationLayer(
                 bitmap = bitmap!!,
@@ -574,6 +613,15 @@ private fun PageItem(
         }
     }
 }
+
+/**
+ * 单页渲染的最大重试次数。
+ *
+ * 3 次快速重试（等会话打开）+ 多次慢重试，总计约 20 秒。
+ * 超过就认为这页真的渲染不出来，把转圈换成可读的错误提示 ——
+ * 无限转圈是最糟的失败方式，用户既不知道发生了什么，也不知道该做什么。
+ */
+private const val MAX_RENDER_RETRY = 8
 
 private data class PageBounds(val padH: Float, val screenW: Float)
 

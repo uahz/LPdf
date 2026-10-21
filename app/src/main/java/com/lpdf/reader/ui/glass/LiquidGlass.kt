@@ -134,19 +134,21 @@ fun LiquidGlass(
                 Modifier
             }
         )
-        // 玻璃本底
+        // 玻璃本底 + 霜化层
+        //
+        // 只画 glassBase（半透明白）是不够的：底下的 PDF 文字会原样透上来，
+        // 图标和正文糊成一片，用户反馈「底栏太透明看不清东西」。
+        // 真实玻璃有两个成分：
+        //   1. 折射/模糊后的底层影像（由 drawBackdrop 提供）
+        //   2. 一层乳白霜化，抬高亮度、压低对比
+        // 少了第 2 层就是「透明塑料」，不是玻璃。
         .drawBehind {
             if (level == GlassLevel.PLAIN) {
-                // PLAIN：连 backdrop 都没有，只靠 6% 白的本底会糊成一团。
-                // 加深本底并加一层暗角，保证文字仍然可读（此时用户看到的是
-                // 「磨砂塑料」而不是「玻璃」，视觉降级但可用）。
-                drawRect(colors.glassBase.copy(alpha = (colors.glassBase.alpha + 0.55f).coerceAtMost(0.72f)))
-                drawRect(
-                    brush = Brush.verticalGradient(
-                        listOf(Color.Black.copy(alpha = 0.06f), Color.Transparent)
-                    )
-                )
+                // PLAIN：连 backdrop 都没有，霜化层要更重，否则根本挡不住底层。
+                drawRect(colors.glassFrost)
+                drawRect(colors.glassBase)
             } else {
+                drawRect(colors.glassFrost)
                 drawRect(colors.glassBase)
             }
         }
@@ -169,8 +171,10 @@ fun LiquidGlass(
             if (showHighlight) {
                 drawTopHighlight(highlightOffset, highlightAlpha, size)
             }
-            // 边缘描边（1dp 内描）
-            drawOutlineStroke(shape, colors.glassStroke)
+            // 边缘立体感：上缘亮线 + 下缘暗线。
+            // 只有一圈均匀描边时玻璃看起来是「贴纸」；参考图的边缘有明显
+            // 明暗差，像一块有厚度的玻璃砖。
+            drawGlassEdge(shape, colors.glassStroke, colors.glassStrokeBottom)
         }
 
     Box(modifier = base, content = content)
@@ -222,6 +226,43 @@ private fun DrawScope.drawOutlineStroke(shape: Shape, color: Color) {
 
         is androidx.compose.ui.graphics.Outline.Rectangle ->
             drawRect(color = color, topLeft = Offset.Zero, size = size, style = stroke)
+    }
+}
+
+/**
+ * 玻璃边缘：上缘亮线 + 下缘暗线，制造「厚度」。
+ *
+ * 单圈均匀描边看起来像贴纸；真实玻璃的侧面会折射光线，
+ * 上缘接光发亮、下缘因厚度投出细暗线。参考图里这个特征很明显。
+ *
+ * 实现方式：用一条**从上到下由亮转暗**的垂直渐变去描边。
+ * 比「先画整圈亮线再叠一条底部暗线」干净得多 —— 后者会在四角糊出
+ * 双层重影，圆角越大越明显。
+ */
+private fun DrawScope.drawGlassEdge(shape: Shape, topColor: Color, bottomColor: Color) {
+    val stroke = Stroke(width = 1.dp.toPx())
+    val brush = Brush.verticalGradient(
+        colors = listOf(topColor, topColor.copy(alpha = 0f), bottomColor),
+        startY = 0f,
+        endY = size.height
+    )
+    when (val outline = shape.createOutline(size, layoutDirection, this)) {
+        is androidx.compose.ui.graphics.Outline.Generic ->
+            drawPath(outline.path, brush = brush, style = stroke)
+
+        is androidx.compose.ui.graphics.Outline.Rounded -> {
+            val rr: RoundRect = outline.roundRect
+            drawRoundRect(
+                brush = brush,
+                topLeft = Offset(rr.left, rr.top),
+                size = Size(rr.width, rr.height),
+                cornerRadius = CornerRadius(rr.topLeftCornerRadius.x, rr.topLeftCornerRadius.y),
+                style = stroke
+            )
+        }
+
+        is androidx.compose.ui.graphics.Outline.Rectangle ->
+            drawRect(brush = brush, topLeft = Offset.Zero, size = size, style = stroke)
     }
 }
 

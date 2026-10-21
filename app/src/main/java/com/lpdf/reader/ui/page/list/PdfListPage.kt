@@ -54,6 +54,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
@@ -426,12 +427,17 @@ fun PdfListPage(
             }
 
             // 提示条
+            //
+            // 位置必须在标题栏**下方**。原来放在 topInset + 8dp，正好压住
+            // 「LPdf」标题和右侧三个图标 —— 启动时那句「需要读取文档权限…」
+            // 直接盖在标题上，两行字叠成一坨（v1.3.4 真机截图）。
+            // 68dp = 标题行高度（图标 40dp + 上下留白），给足呼吸空间。
             GlassSnackbarHost(
                 toast = state.toast,
                 onDismiss = vm::dismissToast,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = topInset + 8.dp)
+                    .padding(top = topInset + 68.dp)
             )
         }
     )
@@ -610,30 +616,52 @@ private fun BottomDock(
     count: Int
 ) {
     val navBottom = bottomInset
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(
-                start = LSpace.pageHorizontal,
-                end = LSpace.pageHorizontal,
-                bottom = navBottom + 20.dp
-            )
-            .height(LSpace.dockHeight),
-        horizontalArrangement = Arrangement.Center
-    ) {
-        LiquidGlass(Modifier.height(LSpace.dockHeight), shape = Shapes2.XL) {
-            Row(
-                Modifier
-                    .height(LSpace.dockHeight)
-                    .padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                DockItem(LIcon.FilePlus, "导入", onPickFile)
-                DockDivider()
-                DockItem(LIcon.Folder, if (count > 0) "目录 ($count)" else "目录", onPickTree)
-                DockDivider()
-                DockItem(LIcon.Rotate, "扫描", onRescan)
+    // Dock 是浮在列表上方的，列表滚到底时最后几行会从玻璃底下透出来 ——
+    // 玻璃再厚也挡不住「内容压着内容」的脏乱感。这里在 Dock 后面补一层
+    // 从透明到底色的竖向渐变，让内容自然淡出、Dock 独立成形。
+    val colors = LocalColors.current
+    Box(Modifier.fillMaxWidth()) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(LSpace.dockHeight + navBottom + 40.dp)
+                .align(Alignment.BottomCenter)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            colors.pageBg.copy(alpha = 0f),
+                            colors.pageBg.copy(alpha = 0.85f),
+                            colors.pageBg
+                        )
+                    )
+                )
+        )
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(
+                    start = LSpace.pageHorizontal,
+                    end = LSpace.pageHorizontal,
+                    bottom = navBottom + 20.dp
+                )
+                .height(LSpace.dockHeight)
+                .align(Alignment.BottomCenter),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            LiquidGlass(Modifier.height(LSpace.dockHeight), shape = Shapes2.XL) {
+                Row(
+                    Modifier
+                        .height(LSpace.dockHeight)
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    DockItem(LIcon.FilePlus, "导入", onPickFile)
+                    DockDivider()
+                    DockItem(LIcon.Folder, if (count > 0) "目录 ($count)" else "目录", onPickTree)
+                    DockDivider()
+                    DockItem(LIcon.Rotate, "扫描", onRescan)
+                }
             }
         }
     }

@@ -22,10 +22,21 @@ data class LPdfColors(
     val danger: Color,
     val success: Color,
     val accent: Color,
-    /** 玻璃本底 */
+    /** 玻璃本底（主体半透明填充） */
     val glassBase: Color,
-    /** 玻璃边缘描边 */
+    /**
+     * 玻璃「霜化」层：叠在本底之上、内容之下的一层乳白雾。
+     *
+     * 纯 `glassBase` 只有 6% 白，叠在彩色 PDF 页面上等于没有 —— 底下的文字
+     * 会原样透上来，图标和文字完全糊在一起看不清（v1.3.4 真机截图）。
+     * 参考图的玻璃是有实体的：能看见底下内容，但亮度被抬高、对比被压低。
+     * 这一层就是这个作用，配合 blur 达成果冻质感。
+     */
+    val glassFrost: Color,
+    /** 玻璃边缘描边（上缘高光 + 下缘暗线，立体感来源） */
     val glassStroke: Color,
+    /** 下缘暗线，让玻璃看起来有厚度 */
+    val glassStrokeBottom: Color,
     val separator: Color
 )
 
@@ -39,8 +50,10 @@ val LightColors = LPdfColors(
     danger = LColors.Danger,
     success = LColors.Success,
     accent = LColors.AccentBlue,
-    glassBase = Color(0x0FFFFFFF),      // 6% 白
-    glassStroke = Color(0x38FFFFFF),    // 22% 白
+    glassBase = Color(0x2EFFFFFF),      // 18% 白：玻璃实体感
+    glassFrost = Color(0x8CFFFFFF),     // 55% 白：霜化层，压住底层对比
+    glassStroke = Color(0xB0FFFFFF),    // 69% 白：亮上缘
+    glassStrokeBottom = Color(0x1A000000), // 10% 黑：下缘厚度暗线
     separator = Color(0x14000000)
 )
 
@@ -54,8 +67,10 @@ val DarkColors = LPdfColors(
     danger = LColors.DangerDark,
     success = LColors.Success,
     accent = LColors.AccentBlue,
-    glassBase = Color(0x0AFFFFFF),      // 4% 白
-    glassStroke = Color(0x24FFFFFF),    // 14% 白
+    glassBase = Color(0x28FFFFFF),      // 16% 白
+    glassFrost = Color(0x59000000),     // 35% 黑：深色下霜化层是压暗而非提亮
+    glassStroke = Color(0x66FFFFFF),    // 40% 白
+    glassStrokeBottom = Color(0x33000000),
     separator = Color(0x1FFFFFFF)
 )
 
@@ -64,7 +79,14 @@ val DarkColors = LPdfColors(
  */
 @Immutable
 data class GlassSpec(
-    val blurDp: Float = 10f,
+    /**
+     * 模糊半径。
+     *
+     * 规范原定 10dp，但真机上玻璃底下的 PDF 文字仍然清晰可辨，
+     * 玻璃看起来像「一块透明塑料」而不是「磨砂玻璃」。参考图里底层内容
+     * 已经被糊成色块，只剩轮廓 —— 对应 18dp 左右的模糊量。
+     */
+    val blurDp: Float = 18f,
     val refraction: Float = 0.12f,
     val dispersion: Float = 0.04f,
     val highlightAlpha: Float = 0.15f,

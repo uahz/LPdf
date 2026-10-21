@@ -186,6 +186,168 @@ object PdfiumEngine {
     /** 页面尺寸（pt） */
     data class PageSize(val widthPt: Float, val heightPt: Float, val rotation: Int)
 
+    // ------------------------------------------------------------------
+    // 常驻文档会话（v1.3.5）
+    // ------------------------------------------------------------------
+
+    /**
+     * 一次打开、多次渲染的文档会话。
+     *
+     * ## 为什么要这个
+     *
+     * 原来 [renderPage] 每渲染一页都要 `openFileDescriptor` + `newDocument`
+     * + `closeDocument` + `close`，全部串行在 [MUTEX] 上。连续滚动时
+     * LazyColumn 一次可见 2~3 页，每页都走一遍打开流程 —— 一本 399 页的书
+     * 打开后要等第一次「打开 + 解析 + 渲染」三连完成，界面上就是一个
+     * 转不完的圈。
+     *
+     * 会话把「打开文档」的开销从**每页一次**降到**每本书一次**：
+     * - 打开后缓存 `PdfDocument` 与文件描述符，渲染时只 `openPage` + `render`
+     * - 自带独立互斥锁，不再和 [pageCount] / [tableOfContents] 抢全局锁
+     * - 用完必须 [close]；上层在离开阅读页时调用
+     *
+     * 注意：PDFium 的 `PdfDocument` 仍然不是线程安全的，同一会话内的
+     * 所有调用都由 [lock] 串行化。不同会话之间互不影响。
+     */
+    class DocSession internal constructor(
+        private val doc: PdfDocument,
+        private val pfd: ParcelFileDescriptor,
+        val pageCount: Int,
+        private val password: String?
+    ) {
+        private val lock = Mutex()
+        private var closed = false
+        private val pages = object : LinkedHashMap<Int, PdfPage>(4, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, PdfPage>?): Boolean {
+                if (size <= CACHED_PAGES) return false
+                // 被淘汰的 PdfPage 必须显式关闭，否则 native 内存会持续上涨
+                runCatching { eldest?.value?.close() }
+                return true
+            }
+        }
+
+        suspend fun render(pageIndex: Int, targetWidthPx: Int): PdfResult<Bitmap> =
+            withContext(Dispatchers.IO) {
+                lock.withLock {
+                    if (closed) return@withLock PdfResult.Failure(PdfError.Unknown("文档已关闭"))
+                    if (pageIndex < 0 || pageIndex >= pageCount) {
+                        return@withLock PdfResult.Failure(PdfError.NotFound("页码超出范围"))
+                    }
+                    try {
+                        val page = pages[pageIndex] ?: doc.openPage(pageIndex).also { pages[pageIndex] = it }
+                        val (w, h) = renderSize(page, targetWidthPx)
+                        if (!PdfLimits.fitsHardwareTexture(w, h)) {
+                            return@withLock PdfResult.Failure(
+                                PdfError.Unknown("页面尺寸超出设备渲染上限（${w}×${h}），已跳过渲染")
+                            )
+                        }
+                        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                        bitmap.eraseColor(Color.WHITE)
+                        page.renderPageBitmap(bitmap, 0, 0, w, h, true)
+                        PdfResult.Success(bitmap)
+                    } catch (t: Throwable) {
+                        if (t is SecurityException) PdfResult.Failure(PdfError.PermissionDenied())
+                        else PdfResult.Failure(PdfError.Unknown("页面渲染失败", t))
+                    }
+                }
+            }
+
+        /** 页面点位尺寸，用于布局占位（避免渲染前高度为 0 导致跳动） */
+        suspend fun pageSize(pageIndex: Int): PdfResult<PageSize> = withContext(Dispatchers.IO) {
+            lock.withLock {
+                if (closed) return@withLock PdfResult.Failure(PdfError.Unknown("文档已关闭"))
+                try {
+                    val page = pages[pageIndex] ?: doc.openPage(pageIndex).also { pages[pageIndex] = it }
+                    PdfResult.Success(
+                        PageSize(
+                            widthPt = page.getPageWidthPoint().toFloat(),
+                            heightPt = page.getPageHeightPoint().toFloat(),
+                            rotation = page.getPageRotation()
+                        )
+                    )
+                } catch (t: Throwable) {
+                    PdfResult.Failure(PdfError.Unknown("读取页面尺寸失败", t))
+                }
+            }
+        }
+
+        suspend fun toc(): List<TocEntry> = withContext(Dispatchers.IO) {
+            lock.withLock {
+                if (closed) return@withLock emptyList()
+                runCatching {
+                    val flat = mutableListOf<TocEntry>()
+                    fun walk(items: List<PdfDocument.Bookmark>, depth: Int) {
+                        items.forEach { b ->
+                            flat += TocEntry(b.title ?: "未命名", b.pageIdx.toInt(), depth)
+                            walk(b.children ?: emptyList(), depth + 1)
+                        }
+                    }
+                    walk(coreInstance?.getTableOfContents(doc) ?: emptyList(), 0)
+                    flat
+                }.getOrDefault(emptyList())
+            }
+        }
+
+        suspend fun close() {
+            withContext(Dispatchers.IO) {
+                lock.withLock {
+                    if (closed) return@withLock
+                    closed = true
+                    pages.values.forEach { p -> runCatching { p.close() } }
+                    pages.clear()
+                    runCatching { coreInstance?.closeDocument(doc) }
+                    runCatching { pfd.close() }
+                }
+            }
+        }
+
+        companion object {
+            /** 常驻缓存的 PdfPage 数量：连续滚动时通常 2~3 页可见，留 6 页余量 */
+            private const val CACHED_PAGES = 6
+        }
+    }
+
+    /**
+     * 打开一个文档会话。
+     *
+     * 返回的 [DocSession] 由调用方负责 [DocSession.close]。
+     */
+    suspend fun openSession(
+        resolver: ContentResolver,
+        uri: Uri,
+        password: String? = null
+    ): PdfResult<DocSession> = withContext(Dispatchers.IO) {
+        MUTEX.withLock {
+            var pfd: ParcelFileDescriptor? = null
+            try {
+                pfd = resolver.openFileDescriptor(uri, "r")
+                    ?: return@withLock PdfResult.Failure(PdfError.NotFound())
+                val core = core()
+                val doc = core.newDocument(pfd, password ?: "")
+                val count = doc.getPageCount().toInt()
+                if (count <= 0) {
+                    runCatching { core.closeDocument(doc) }
+                    runCatching { pfd.close() }
+                    return@withLock PdfResult.Failure(PdfError.Corrupted("文档没有可读页面"))
+                }
+                PdfResult.Success(DocSession(doc, pfd, count, password))
+            } catch (e: SecurityException) {
+                runCatching { pfd?.close() }
+                PdfResult.Failure(PdfError.PermissionDenied())
+            } catch (t: Throwable) {
+                runCatching { pfd?.close() }
+                val msg = t.message ?: ""
+                when {
+                    msg.contains("password", true) -> PdfResult.Failure(PdfError.WrongPassword())
+                    msg.contains("security", true) -> PdfResult.Failure(PdfError.PasswordRequired())
+                    msg.contains("denied", true) -> PdfResult.Failure(PdfError.PermissionDenied())
+                    else -> PdfResult.Failure(PdfError.Unknown("打开文档失败", t))
+                }
+            }
+        }
+    }
+
+
     suspend fun pageSize(
         resolver: ContentResolver,
         uri: Uri,

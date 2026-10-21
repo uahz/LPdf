@@ -1,4 +1,4 @@
-# LPdf 1.3.4 · Android PDF 阅读器
+# LPdf 1.3.5 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.3.4-release.apk
+adb install -r dist/LPdf-1.3.5-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -27,7 +27,7 @@ export JAVA_HOME=/opt/jdk21
 export ANDROID_HOME=/opt/android-sdk
 ./gradlew :app:assembleRelease       # 产物 app/build/outputs/apk/release/
 ./gradlew :app:assembleDebug         # 仅供本地调试，不发布
-./gradlew :app:testDebugUnitTest     # 87 个单测
+./gradlew :app:testDebugUnitTest     # 96 个单测
 ```
 
 **签名配置**：`keystore.properties` 与 `keystore/` 均不入库。首次构建若无这两者，
@@ -35,6 +35,50 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.3.5 变更
+
+真机反馈修的三件事：**打开 PDF 一直转圈**、**底栏太透明看不清**、**首页顶部文字重叠**。
+
+### 转圈：一次打开，反复渲染
+
+`renderPage` 原来每次渲染一页都要 `openFileDescriptor` → `newDocument` → 渲染 →
+`closeDocument` → `close`，全部串在**一把全局锁**上，还要和 `pageCount`、
+`tableOfContents` 抢。连续滚动一次可见 2~3 页，每页都走一遍完整的打开流程，
+399 页的书首次进入就是一个转不完的圈。
+
+新增 `PdfiumEngine.DocSession`：文档只打开一次，渲染时仅 `openPage` + `render`，
+自带独立互斥锁不再抢全局锁，并缓存最近 6 个 `PdfPage`。目录也走同一会话。
+
+另外两处配套：
+
+- **重试有上限**：页面渲染循环原来没有次数限制，一旦某页永远渲染不出来，圆环就永远转。现在最多 8 次，超时后把转圈换成可读的错误提示 —— 无限转圈是最糟的失败方式。
+- **失败页不重试**：`renderErrors` 记住失败的页与原因，避免反复占用渲染锁拖慢其它页。
+
+### 玻璃：从「透明塑料」变成「磨砂玻璃」
+
+| 项 | 原值 | 现值 | 原因 |
+|---|---|---|---|
+| 霜化层 `glassFrost` | 无 | 55% 白（深色 35% 黑） | **这是主因**。原来只有 6% 白本底，底下 PDF 正文原样透上来，图标和文字糊成一片 |
+| 本底 `glassBase` | 6% 白 | 18% 白 | 补上实体感 |
+| 模糊半径 | 10dp | **18dp** | 10dp 时底层正文仍清晰可辨，玻璃像透明塑料；参考图里内容已被糊成色块 |
+| 边缘描边 | 单圈 22% 白 | 上缘 69% 亮线 → 下缘暗线渐变 | 单圈均匀描边像贴纸；参考图边缘有明显明暗差，像有厚度的玻璃砖 |
+
+深色模式下霜化层用**黑**而非白 —— 深色主题叠白雾会变成发灰的脏块。
+
+### 首页顶部文字重叠
+
+启动提示「需要读取文档权限才能自动列出本地 PDF…」放在 `topInset + 8dp`，
+与「LPdf」标题完全同高，两行字叠成一坨。现在下移到标题下方（`+68dp`）。
+
+底栏后面补了一层从透明到底色的竖向渐变 —— Dock 浮在列表上方，列表滚到底时
+最后几行会从玻璃底下透出来，玻璃再厚也挡不住「内容压着内容」的脏乱感。
+
+### 验证
+
+- **96 项单测全绿**（新增 9 项：`GlassTokensTest` 7 项锁住玻璃光学参数、`HomeHeaderOverlapTest` 2 项锁住顶部布局）
+- 顶部重叠修复做了反向验证：把 `+68dp` 改回 `+8dp`，测试立即失败
+- `GlassCapabilityTest` 里两条把 `blurDp = 10f` 写死的断言已同步更新
 
 ## 1.3.4 变更
 
@@ -134,7 +178,7 @@ app/src/main/java/com/lpdf/reader/
 
 ## 已知限制
 
-- **未在真机 / 模拟器验证**：构建环境无 KVM，Android 模拟器无法启动。已验证的是：编译通过、R8 通过、87 个 JVM 测试通过（含标注坐标 JSON 往返、扁平化坐标换算、水印几何计算）。**玻璃的 AGSL 折射效果只能在真机上看，请实际安装确认。**
+- **未在真机 / 模拟器验证**：构建环境无 KVM，Android 模拟器无法启动。已验证的是：编译通过、R8 通过、96 个 JVM 测试通过（含标注坐标 JSON 往返、扁平化坐标换算、水印几何计算）。**玻璃的 AGSL 折射效果只能在真机上看，请实际安装确认。**
 - **标注导出未做端到端验证**：依赖 PDFium native so 与 PdfDocument 写入，JVM 侧只能覆盖坐标换算，实际导出结果需真机确认。
 - **形状只画矩形**：`Annotation.Shape.kind` 支持 `RECT`/`OVAL`/`ARROW`，但阅读页只渲染 RECT，导出同步了这一行为。
 - **表单填写 / 元数据编辑**：引擎与数据模型已具备，UI 尚未接入，属 v2.0 范围。

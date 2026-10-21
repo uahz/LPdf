@@ -109,6 +109,9 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
     /** pageCache 当前占用字节数（随插入/淘汰维护，避免每次遍历求和） */
     private var cachedBytes = 0L
 
+    /** 渲染失败页 -> 原因。换文档时清空。 */
+    private val renderErrors = mutableMapOf<Int, String>()
+
     /** 单次可用的位图缓存预算：堆的 1/4，下限 32MB 上限 192MB */
     private val CACHE_MAX_BYTES: Long = run {
         val heap = Runtime.getRuntime().maxMemory()
@@ -134,6 +137,7 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
             pageCache.clear()
             cachedBytes = 0L
         }
+        synchronized(renderErrors) { renderErrors.clear() }
     }
 
     private var uri: Uri = Uri.EMPTY
@@ -151,6 +155,15 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
      * 出现「点了 A 却显示 B」。现在新一次 `bind()` 先取消上一次。
      */
     private var openJob: Job? = null
+
+    /**
+     * 当前文档的常驻渲染会话。
+     *
+     * 生命周期跟着 ViewModel：换文档时关旧的，`onCleared` 时关最后一个。
+     * 这个字段是阅读页「翻页不再转圈」的关键 —— 文档只打开一次。
+     */
+    @Volatile
+    private var sessionRef: PdfiumEngine.DocSession? = null
 
     fun bind(uriString: String, displayName: String, lastModified: Long, password: String?) {
         if (docKey.isNotEmpty() && this.uri.toString() == uriString) return
@@ -181,19 +194,26 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
     private fun open(displayName: String) {
         openJob = viewModelScope.launch {
-            val countRes = PdfiumEngine.pageCount(container.resolver(), uri, password)
-            when (countRes) {
+            // 先建常驻会话：打开一次、后续所有翻页共用同一个 native 文档。
+            // 原来每渲染一页都 openFileDescriptor + newDocument，399 页的书
+            // 首次滚动会卡出「一直转圈」。会话失败再回落到只读页数。
+            val sessionRes = PdfiumEngine.openSession(container.resolver(), uri, password)
+            when (sessionRes) {
                 is PdfResult.Failure -> _state.value = _state.value.copy(
                     loading = false,
-                    error = countRes.error
+                    error = sessionRes.error
                 )
 
                 is PdfResult.Success -> {
-                    val count = countRes.value
+                    val session = sessionRes.value
+                    sessionRef?.let { runCatching { it.close() } }
+                    sessionRef = session
+                    val count = session.pageCount
                     val saved = withContext(AppDispatchers.io) {
                         container.prefs.progressMapSnapshot(docKey)
                     }
-                    val toc = PdfiumEngine.tableOfContents(container.resolver(), uri).getOrNull() ?: emptyList()
+                    // 目录也走会话，不再单独开一次文档
+                    val toc = session.toc()
                     val doc = container.annotations.load(docKey)
                     annotations = doc
                     _state.value = _state.value.copy(
@@ -216,10 +236,25 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     /** 预渲染指定页；宽度为屏幕像素宽 */
+    /**
+     * 确保某页已渲染。
+     *
+     * 走常驻会话：渲染只做 `openPage` + `render`，不再重开文档。
+     * 会话还不可用（正在打开）时直接返回，调用方下一帧会重试 ——
+     * 原来这里会 fallback 到一次性 renderPage，等于又开一遍文档。
+     */
     suspend fun ensureRendered(page: Int, widthPx: Int) {
         if (page < 0 || page >= _state.value.pageCount) return
         synchronized(pageCache) { if (pageCache.containsKey(page)) return }
-        val res = PdfiumEngine.renderPage(container.resolver(), uri, page, widthPx, password)
+        // 已经失败过的页不要反复重试：PDFium 对同一页的失败是确定性的，
+        // 重试只会白白占着渲染锁，让其它页排不上队。
+        synchronized(renderErrors) { if (renderErrors.containsKey(page)) return }
+        val session = sessionRef ?: return
+        val res = session.render(page, widthPx)
+        if (res is PdfResult.Failure) {
+            synchronized(renderErrors) { renderErrors[page] = res.error.message ?: "页面渲染失败" }
+            return
+        }
         val bmp = res.getOrNull() ?: return
         withContext(AppDispatchers.main) {
             putPage(page, bmp)
@@ -227,6 +262,9 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
             _state.value = _state.value.copy(zoom = _state.value.zoom)
         }
     }
+
+    /** 某页的渲染失败原因；未失败返回 null。UI 据此把转圈换成可读提示。 */
+    fun lastRenderError(page: Int): String? = synchronized(renderErrors) { renderErrors[page] }
 
     fun onPageSettled(page: Int) {
         if (_state.value.currentPage == page) return
@@ -664,6 +702,15 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
     override fun onCleared() {
         flush()
         clearPageCache()
+        // 会话持有 native 文档与文件描述符，ViewModel 销毁时必须显式关闭，
+        // 否则每进出一次阅读页就漏一个 PdfDocument。
+        // onCleared 不能挂起，这里用 runBlocking 等关闭完成 —— 关闭本身很快，
+        // 但必须确保 native 资源真的释放了。
+        val session = sessionRef
+        sessionRef = null
+        if (session != null) {
+            runCatching { kotlinx.coroutines.runBlocking { session.close() } }
+        }
         super.onCleared()
     }
 

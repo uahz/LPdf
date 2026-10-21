@@ -146,14 +146,16 @@ class GlassCapabilityTest {
         val spec = com.lpdf.reader.ui.theme.GlassSpec()
         assertTrue(spec.allowRefraction)
         assertEquals(0.12f, spec.refraction, 0.0001f)
-        assertEquals(10f, spec.blurDp, 0.0001f)
+        // v1.3.5：10dp 时底层正文仍清晰可辨，玻璃像透明塑料；提到 18dp。
+        // 这里断言「大于等于 16」而不是钉死数值，避免以后微调就得改测试。
+        assertTrue("模糊半径应足够糊掉底层文字", spec.blurDp >= 16f)
     }
 
     @Test
     fun `copy 可关闭折射而不影响其他参数`() {
         val spec = com.lpdf.reader.ui.theme.GlassSpec().copy(allowRefraction = false)
         assertFalse(spec.allowRefraction)
-        assertEquals("关闭折射不应改动模糊半径", 10f, spec.blurDp, 0.0001f)
+        assertTrue("关闭折射不应改动模糊半径", spec.blurDp >= 16f)
         assertEquals("关闭折射不应改动高光", 0.15f, spec.highlightAlpha, 0.0001f)
     }
 }

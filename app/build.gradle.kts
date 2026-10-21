@@ -41,8 +41,8 @@ android {
         applicationId = "com.lpdf.reader"
         minSdk = 33
         targetSdk = 35
-        versionCode = 134
-        versionName = "1.3.4"
+        versionCode = 135
+        versionName = "1.3.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
