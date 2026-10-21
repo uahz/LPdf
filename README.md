@@ -1,4 +1,4 @@
-# LPdf 1.3.5 · Android PDF 阅读器
+# LPdf 1.4.0 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.3.5-release.apk
+adb install -r dist/LPdf-1.4.0-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -27,7 +27,7 @@ export JAVA_HOME=/opt/jdk21
 export ANDROID_HOME=/opt/android-sdk
 ./gradlew :app:assembleRelease       # 产物 app/build/outputs/apk/release/
 ./gradlew :app:assembleDebug         # 仅供本地调试，不发布
-./gradlew :app:testDebugUnitTest     # 96 个单测
+./gradlew :app:testDebugUnitTest     # 103 个单测
 ```
 
 **签名配置**：`keystore.properties` 与 `keystore/` 均不入库。首次构建若无这两者，
@@ -35,6 +35,51 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.4.0 变更
+
+底栏换成 iOS 26 同款的**悬浮玻璃 + 药丸滑块 + 可拖拽浮卡**。
+
+### 底栏：药丸滑块浮在玻璃之上
+
+旧底栏是「一排平铺按钮装进一个玻璃盒」，选中项只是加一层淡底色 —— 没有层次。
+
+新版每一项外面可以浮一片**独立玻璃药丸**。它有自己的折射、自己的边缘色散，
+压在整条底板之上；两片玻璃重叠处的折射差异会自然产生参考图里那圈彩色描边。
+
+- **弹簧滑动**：切换时药丸不是瞬移，用 `spring(0.72, MediumLow)` 追目标位置，
+  中间留一点惯性
+- **横向拖动**：手指划过整条底栏时药丸跟着走，松手吸附到最近一项，
+  拖出两端用 `Motion.rubberBand` 加阻尼
+- **按压回弹**：按下去 0.90，松手用欠阻尼弹簧收回，会轻微过冲
+
+首页五项：`全部 / 最近 / ＋导入（主按钮）/ 加密 / 目录`。
+中央「导入」是实心圆底主按钮，与参考图一致。
+
+阅读页底栏同样处理（8 项紧凑模式，只有图标），选中态跟随当前工具
+（目录 / 书签 / 搜索 / 高亮 / 墨迹 / 批注）。
+
+### 长按浮卡：浮起 + 跟手形变 + 抛掷动量
+
+新增 `GlassFloatingCard`：
+
+| 阶段 | 行为 |
+| --- | --- |
+| 浮起 | 0.88 → 1 放大 + −1.5° 倾斜归零，欠阻尼弹簧收尾，会过冲 |
+| 跟手 | 位移只作用在卡片这层，蒙版完全不动（否则整屏跟着晃） |
+| 形变 | 按水平拖动速度做剪切，上限 ±4°；松手后慢一档归零，像真有惯性 |
+| 抛掷 | 读 `VelocityTracker` 真实速度，先滑一小段，再用 `Motion.dragReturn` 弹回 |
+| 越界 | 出安全区后 `Motion.rubberBand` 递增阻尼，不硬顶 |
+
+蒙版同时加深（0.28 → 0.42）并叠一层竖向渐变，让上层玻璃的霜化层能抓出层次。
+
+### 回归测试
+
+新增 9 项（`GlassTabBarTest` 4 项、`GlassFloatingCardTest` 3 项，
+`DockIntegrationTest` 改写 1 项）。总计 **103 项，全绿**。
+
+`DockIntegrationTest` 做过反向验证：撤掉 `Box.align(BottomCenter)` 后
+该测试确实失败，说明它守的是真实定位而不是「高度 > 64dp」这种假断言。
 
 ## 1.3.5 变更
 

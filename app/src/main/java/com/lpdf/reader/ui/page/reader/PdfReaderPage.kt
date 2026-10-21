@@ -81,6 +81,8 @@ import com.lpdf.reader.ui.glass.GlassPillButton
 import com.lpdf.reader.ui.glass.GlassProgressRing
 import com.lpdf.reader.ui.glass.GlassSnackbarHost
 import com.lpdf.reader.ui.glass.GlassStateCard
+import com.lpdf.reader.ui.glass.GlassTab
+import com.lpdf.reader.ui.glass.GlassTabBar
 import com.lpdf.reader.ui.glass.LIcon
 import com.lpdf.reader.ui.glass.LIconView
 import com.lpdf.reader.ui.glass.LiquidGlass
@@ -985,8 +987,41 @@ private fun ReaderDock(
     onPrev: () -> Unit,
     onNext: () -> Unit
 ) {
-    val colors = LocalColors.current
-    Row(
+    val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
+
+    // v1.4.0：换成与首页一致的 iOS 玻璃药丸滑块。
+    //
+    // 旧版是「一排 DockBtn 装进一个玻璃盒」，选中态只是给按钮加一层淡底色，
+    // 没有"浮起来"的层次。新版让选中的那一项外面包一片独立玻璃药丸，
+    // 它会随工具切换做弹簧滑动，跟上一次选中项之间留一点惯性。
+    //
+    // 「上一页 / 下一页」是瞬动按钮，不参与选中逻辑，所以整条 dock 用
+    // followSelection = false 关闭滑块的自动跟随 —— 但药丸仍会被拖动。
+    val tabs = remember {
+        listOf(
+            GlassTab(LIcon.ChevronLeft, "上一页"),
+            GlassTab(LIcon.List, "目录"),
+            GlassTab(LIcon.Bookmark, "书签"),
+            GlassTab(LIcon.Search, "搜索"),
+            GlassTab(LIcon.HighlightPen, "高亮"),
+            GlassTab(LIcon.Pencil, "墨迹"),
+            GlassTab(LIcon.Note, "批注"),
+            GlassTab(LIcon.ChevronRight, "下一页")
+        )
+    }
+
+    // 哪一项算「当前选中」：面板打开优先，其次编辑工具
+    val selectedIndex = when {
+        tocOpen -> 1
+        bookmarked -> 2
+        searchActive -> 3
+        tool == EditorTool.HIGHLIGHT -> 4
+        tool == EditorTool.INK -> 5
+        tool == EditorTool.NOTE -> 6
+        else -> -1
+    }
+
+    Box(
         Modifier
             .fillMaxWidth()
             .padding(
@@ -994,28 +1029,31 @@ private fun ReaderDock(
                 end = LSpace.pageHorizontal,
                 bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 20.dp
             ),
-        horizontalArrangement = Arrangement.Center
+        contentAlignment = Alignment.Center
     ) {
-        LiquidGlass(Modifier.height(LSpace.dockHeight), shape = Shapes2.XL) {
-            Row(
-                Modifier
-                    .height(LSpace.dockHeight)
-                    .padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(0.dp)
-            ) {
-                DockBtn(LIcon.ChevronLeft, "上一页", false, haptic) { onPrev() }
-                DockBtn(LIcon.List, "目录", tocOpen, haptic) { onToc() }
-                DockBtn(LIcon.Bookmark, "书签", bookmarked, haptic) { onBookmarks() }
-                DockBtn(LIcon.Search, "搜索", searchActive, haptic) { onSearch() }
-                DockBtn(LIcon.HighlightPen, "高亮", tool == EditorTool.HIGHLIGHT, haptic) {
-                    onTool(EditorTool.HIGHLIGHT)
+        GlassTabBar(
+            items = tabs,
+            selectedIndex = selectedIndex.coerceAtLeast(0),
+            compact = true,
+            followSelection = selectedIndex >= 0,
+            onSelect = { i ->
+                if (haptic) {
+                    haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
                 }
-                DockBtn(LIcon.Pencil, "墨迹", tool == EditorTool.INK, haptic) { onTool(EditorTool.INK) }
-                DockBtn(LIcon.Note, "批注", tool == EditorTool.NOTE, haptic) { onTool(EditorTool.NOTE) }
-                DockBtn(LIcon.ChevronRight, "下一页", false, haptic) { onNext() }
-            }
-        }
+                when (i) {
+                    0 -> onPrev()
+                    1 -> onToc()
+                    2 -> onBookmarks()
+                    3 -> onSearch()
+                    4 -> onTool(EditorTool.HIGHLIGHT)
+                    5 -> onTool(EditorTool.INK)
+                    6 -> onTool(EditorTool.NOTE)
+                    7 -> onNext()
+                }
+            },
+            modifier = Modifier.width(LSpace.dockHeight * 8 + 16.dp),
+            height = LSpace.dockHeight
+        )
     }
 }
 

@@ -74,7 +74,9 @@ import com.lpdf.reader.core.util.Formatters
 import com.lpdf.reader.data.local.AppSettings
 import com.lpdf.reader.data.local.ListFilter
 import com.lpdf.reader.data.local.SortOrder
+import androidx.compose.ui.draw.drawBehind
 import com.lpdf.reader.ui.glass.GlassDivider
+import com.lpdf.reader.ui.glass.GlassFloatingCard
 import com.lpdf.reader.ui.glass.GlassHeader
 import com.lpdf.reader.ui.glass.GlassIconButton
 import com.lpdf.reader.ui.glass.GlassListRow
@@ -83,6 +85,8 @@ import com.lpdf.reader.ui.glass.GlassPillButton
 import com.lpdf.reader.ui.glass.GlassPopover
 import com.lpdf.reader.ui.glass.GlassSnackbarHost
 import com.lpdf.reader.ui.glass.GlassStateCard
+import com.lpdf.reader.ui.glass.GlassTab
+import com.lpdf.reader.ui.glass.GlassTabBar
 import com.lpdf.reader.ui.glass.LIcon
 import com.lpdf.reader.ui.glass.LIconView
 import com.lpdf.reader.ui.glass.LiquidGlass
@@ -350,12 +354,13 @@ fun PdfListPage(
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
             ) {
-                BottomDock(
+                LibraryTabBar(
                     bottomInset = bottomInset,
+                    selected = state.listFilter,
+                    onSelect = { vm.setFilter(it) },
                     onPickFile = { pickFile.launch(arrayOf("application/pdf")) },
                     onPickTree = { pickTree.launch(null) },
-                    onRescan = { vm.scan() },
-                    count = state.treeCount
+                    onRescan = { vm.scan() }
                 )
             }
 
@@ -608,91 +613,50 @@ private fun SearchField(value: String, onValueChange: (String) -> Unit, onClose:
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun BottomDock(
+private fun LibraryTabBar(
     bottomInset: Dp,
+    selected: ListFilter,
+    onSelect: (ListFilter) -> Unit,
     onPickFile: () -> Unit,
     onPickTree: () -> Unit,
-    onRescan: () -> Unit,
-    count: Int
+    onRescan: () -> Unit
 ) {
-    val navBottom = bottomInset
-    // Dock 是浮在列表上方的，列表滚到底时最后几行会从玻璃底下透出来 ——
-    // 玻璃再厚也挡不住「内容压着内容」的脏乱感。这里在 Dock 后面补一层
-    // 从透明到底色的竖向渐变，让内容自然淡出、Dock 独立成形。
     val colors = LocalColors.current
-    Box(Modifier.fillMaxWidth()) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(LSpace.dockHeight + navBottom + 40.dp)
-                .align(Alignment.BottomCenter)
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            colors.pageBg.copy(alpha = 0f),
-                            colors.pageBg.copy(alpha = 0.85f),
-                            colors.pageBg
-                        )
-                    )
-                )
+    val scope = rememberCoroutineScope()
+
+    // 五项：全部 / 最近 / ＋（导入）/ 加密 / 目录
+    // 中间「＋」是主操作，做成独立实心胶囊 —— 与参考图一致。
+    val tabs = remember {
+        listOf(
+            GlassTab(LIcon.Folder, "全部"),
+            GlassTab(LIcon.List, "最近"),
+            GlassTab(LIcon.Plus, "导入", primary = true),
+            GlassTab(LIcon.Lock, "加密"),
+            GlassTab(LIcon.PageGrid, "目录")
         )
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(
-                    start = LSpace.pageHorizontal,
-                    end = LSpace.pageHorizontal,
-                    bottom = navBottom + 20.dp
-                )
-                .height(LSpace.dockHeight)
-                .align(Alignment.BottomCenter),
-            horizontalArrangement = Arrangement.Center
-        ) {
-            LiquidGlass(Modifier.height(LSpace.dockHeight), shape = Shapes2.XL) {
-                Row(
-                    Modifier
-                        .height(LSpace.dockHeight)
-                        .padding(horizontal = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    DockItem(LIcon.FilePlus, "导入", onPickFile)
-                    DockDivider()
-                    DockItem(LIcon.Folder, if (count > 0) "目录 ($count)" else "目录", onPickTree)
-                    DockDivider()
-                    DockItem(LIcon.Rotate, "扫描", onRescan)
+    }
+    val filters = remember {
+        listOf(ListFilter.ALL, ListFilter.RECENT, null, ListFilter.ENCRYPTED, ListFilter.SAF)
+    }
+    val selectedIndex = filters.indexOf(selected).let { if (it < 0) 0 else it }
+
+    Column(Modifier.fillMaxWidth()) {
+        GlassTabBar(
+            items = tabs,
+            selectedIndex = selectedIndex,
+            onSelect = { i ->
+                when (val f = filters[i]) {
+                    null -> onPickFile()
+                    else -> onSelect(f)
                 }
-            }
-        }
+            },
+            modifier = Modifier.padding(horizontal = LSpace.pageHorizontal)
+        )
+        Spacer(Modifier.height(bottomInset + 12.dp))
     }
 }
 
-@Composable
-private fun DockItem(icon: LIcon, label: String, onClick: () -> Unit) {
-    val colors = LocalColors.current
-    Column(
-        Modifier
-            .clip(Shapes2.M)
-            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onClick() }
-            .padding(horizontal = 14.dp, vertical = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        LIconView(icon, size = 19.dp, color = colors.text, strokeWidth = 1.7.dp)
-        Spacer(Modifier.height(3.dp))
-        Text(label, style = LType.Micro, color = colors.secondary)
-    }
-}
 
-@Composable
-private fun DockDivider() {
-    val colors = LocalColors.current
-    Box(
-        Modifier
-            .width(0.5.dp)
-            .height(26.dp)
-            .background(colors.separator)
-    )
-}
 
 // ---------------------------------------------------------------------------
 // 空态
@@ -755,38 +719,44 @@ private fun ItemActionSheet(
     onDismiss: () -> Unit
 ) {
     val colors = LocalColors.current
-    var offset by remember { mutableStateOf(Offset.Zero) }
+    // 拖拽位移：由 GlassFloatingCard 内部维护，这里只需要读出当前值
+    // 给玻璃的顶部高光做偏移，让"光"跟着手走。
+    var dragOffset by remember { mutableStateOf(Offset.Zero) }
 
     Box(Modifier.fillMaxSize()) {
+        // 蒙版：比之前更深一档（0.28 → 0.42），并把背景稍微压暗压冷，
+        // 让上层玻璃卡片的霜化层能"抓"出层次。iOS 长按态就是这个观感。
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.28f))
+                .drawBehind {
+                    drawRect(Color.Black.copy(alpha = 0.42f))
+                    drawRect(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Black.copy(alpha = 0.18f),
+                                Color.Transparent,
+                                Color.Black.copy(alpha = 0.22f)
+                            )
+                        )
+                    )
+                }
                 .pointerInput(Unit) { detectTapGestures { onDismiss() } }
         )
-        // 被长按的卡片预览：跟随手指轻微拖拽 + 实时扭曲
-        Box(
-            Modifier
-                .align(Alignment.Center)
-                .offset { IntOffset(offset.x.toInt(), offset.y.toInt()) }
-                .pointerInput(Unit) {
-                    detectTapGestures(onTap = { onOpen() })
-                }
-                .pointerInput(Unit) {
-                    detectDragGestures(
-                        onDragEnd = { offset = Offset.Zero }
-                    ) { change, drag ->
-                        change.consume()
-                        offset += drag * 0.85f
-                    }
-                }
+
+        GlassFloatingCard(
+            onDismiss = onDismiss,
+            onDrag = { dragOffset = it }
         ) {
             LiquidGlass(
-                modifier = Modifier.width(232.dp),
+                modifier = Modifier
+                    .width(232.dp)
+                    .pointerInput(Unit) { detectTapGestures(onTap = { onOpen() }) },
                 shape = Shapes2.XL,
                 highlightColor = item.highlightColor?.let { Color(it) },
+                highlightTint = 0.18f,
                 showHighlight = true,
-                highlightOffset = offset
+                highlightOffset = dragOffset
             ) {
                 Column(Modifier.padding(14.dp)) {
                     LocalThumbnail(
