@@ -13,6 +13,9 @@ import com.lpdf.reader.data.local.Bookmark
 import com.lpdf.reader.data.local.SignatureAsset
 import com.lpdf.reader.data.local.ReadingMode
 import com.lpdf.reader.data.pdf.PageRender
+import com.lpdf.reader.data.pdf.TextLayer
+import com.lpdf.reader.data.pdf.TextSelection
+import com.lpdf.reader.data.pdf.selectByDrag
 import com.lpdf.reader.data.pdf.PdfFlattener
 import com.lpdf.reader.data.pdf.PdfiumEngine
 import com.lpdf.reader.data.pdf.Tile
@@ -42,6 +45,8 @@ data class ReaderUiState(
     val error: PdfError? = null,
     val toc: List<PdfiumEngine.TocEntry> = emptyList(),
     val tocOpen: Boolean = false,
+    /** 夜间模式：页面底图反色（v1.7.0） */
+    val pageInvert: Boolean = false,
     val chromeVisible: Boolean = true,
     val tool: EditorTool = EditorTool.NONE,
     val toolIslandOpen: Boolean = false,
@@ -83,6 +88,21 @@ data class ReaderUiState(
 class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
     private val _state = MutableStateFlow(ReaderUiState())
+
+    /**
+     * 复制文字用的剪贴板。
+     *
+     * 放在 ViewModel 层而不是 Composable 里，是因为 `LocalClipboardManager`
+     * 已废弃（要换成挂起的 `LocalClipboard`），而这里本来就在主线程调用，
+     * 直接用系统服务最省事，也不用为一次复制引入协程。
+     */
+    private val clipboard: android.content.ClipboardManager? by lazy {
+        runCatching {
+            container.appContext()
+                .getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                as? android.content.ClipboardManager
+        }.getOrNull()
+    }
     val state: StateFlow<ReaderUiState> = _state.asStateFlow()
 
     /**
@@ -188,6 +208,10 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
             cachedBytes = 0L
         }
         synchronized(renderErrors) { renderErrors.clear() }
+        // 文字层跟着文档走。换书不清理的话，新书的同一页号会拿到旧书的文字，
+        // 长按选中后复制出来的是上一本书的句子
+        textLayerPage = -1
+        textLayerCache = null
     }
 
     private var uri: Uri = Uri.EMPTY
@@ -229,6 +253,14 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
     /** 是否在停笔 600ms 后自动落盘 */
     private var autoSaveAnnotations: Boolean = true
+
+    /**
+     * 夜间模式：页面底图反色（v1.7.0）。
+     *
+     * 缓存是按页号索引的，不区分反色与否 —— 所以这个值一变就必须清缓存，
+     * 否则用户切到夜间后仍会看到没反色的旧位图，要等它自己滚出 LRU 才生效。
+     */
+    private var pageInvert: Boolean = false
 
     /**
      * 当前文档的常驻渲染会话。
@@ -361,10 +393,16 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
         // 如果沿用「已完整就 return」，用户横屏或拉伸窗口后页面仍是旧的低分辨率
         // 版本 —— 看着糊，却再也刷不新。这里把已渲染宽度一并纳入判断。
         val wanted = widthPx.coerceIn(64, PdfiumEngine.MAX_RENDER_WIDTH)
+        val invert = pageInvert
         synchronized(pageCache) {
             val cached = pageCache[page]
-            // 宽度差 < 10% 视为等效，避免窗口微抖动时反复重渲
-            if (cached?.isComplete == true && cached.widthPx >= (wanted * 0.9f).toInt()) return
+            // 宽度差 < 10% 视为等效，避免窗口微抖动时反复重渲。
+            // 同时必须核对反色标记：换了夜间模式而缓存还是旧的那一张，
+            // 会一直显示白底页面，直到它被 LRU 淘汰 —— 看起来就是「开关失灵」。
+            if (cached?.isComplete == true &&
+                cached.widthPx >= (wanted * 0.9f).toInt() &&
+                cached.inverted == invert
+            ) return
         }
         // 已经失败过的页不要反复重试：PDFium 对同一页的失败是确定性的，
         // 重试只会白白占着渲染锁，让其它页排不上队。
@@ -392,6 +430,7 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
                         widthPx = plan.widthPx,
                         heightPx = plan.heightPx,
                         degraded = plan.degraded,
+                        inverted = invert,
                         tiles = emptyList(),
                         tileCount = plan.tileCount
                     )
@@ -404,7 +443,7 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
         // ③ 逐块渲染
         var firstFailure: String? = null
-        val res = session.renderTiles(page, plan) { tile ->
+        val res = session.renderTiles(page, plan, invert) { tile ->
             if (firstFailure == null) {
                 withContext(AppDispatchers.main) {
                     appendTile(page, tile, plan)
@@ -429,6 +468,62 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
     /** 某页的渲染失败原因；未失败返回 null。UI 据此把转圈换成可读提示。 */
     fun lastRenderError(page: Int): String? = synchronized(renderErrors) { renderErrors[page] }
+
+    // ---------------------------------------------------------------- 文本选择（v1.7.0）
+
+    /** 已取过文字层的页。只留当前页：翻页就换，多留只是白占内存。 */
+    private var textLayerPage: Int = -1
+    private var textLayerCache: TextLayer? = null
+
+    /**
+     * 取某页文字层。有缓存直接返回，没有就去 native 取一次。
+     *
+     * 选择交互每帧都在算选区，如果每次都进 native 会明显卡顿 ——
+     * 所以整页文字一次性取回，后续拖动全在本地算。
+     */
+    suspend fun textLayer(page: Int): TextLayer? {
+        if (page == textLayerPage) return textLayerCache
+        val session = sessionRef ?: return null
+        val res = session.textLayer(page)
+        val layer = when (res) {
+            is PdfResult.Success -> res.value
+            is PdfResult.Failure -> {
+                // 扫描件没有文字层，不是错误。失败的页也缓存一个空层，
+                // 免得用户每次长按都白等一次 native 调用
+                TextLayer(page, emptyList(), 0)
+            }
+        }
+        textLayerPage = page
+        textLayerCache = layer
+        return layer
+    }
+
+    /**
+     * 按「按下点 → 抬起点」算选区。
+     *
+     * 坐标是相对单页内容区的归一化 0~1，与标注同一套约定。
+     * 页面没有文字层时返回空选区，调用方据此提示「这一页没有文字」。
+     */
+    fun selectionBetween(page: Int, sx: Float, sy: Float, ex: Float, ey: Float): TextSelection? {
+        val layer = textLayerCache?.takeIf { it.page == page } ?: return null
+        if (layer.isEmpty) return null
+        return selectByDrag(layer, sx, sy, ex, ey)
+    }
+
+    /** 复制到剪贴板。返回复制的字符数，0 表示没选中任何东西。 */
+    fun copySelection(sel: TextSelection): Int {
+        val text = sel.text
+        if (text.isBlank()) return 0
+        clipboard?.setText(text)
+        toast("已复制 ${text.length} 个字符")
+        return text.length
+    }
+
+    /** 长按取词时用：把点周围最近的词整段选出来（这里只取所在行的一段做启发式） */
+    fun clearTextLayerCache() {
+        textLayerPage = -1
+        textLayerCache = null
+    }
 
     /** 跳到指定页（已打开同一文档时用；触发页码同步与进度保存） */
     fun jumpTo(page: Int) {
@@ -456,8 +551,23 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
     // ---------------------------------------------------------------- UI 开关
 
-    fun toggleChrome() = _state.value.let { _state.value = it.copy(chromeVisible = !it.chromeVisible) }
-    fun setChrome(visible: Boolean) = _state.value.let { _state.value = it.copy(chromeVisible = visible) }
+    /**
+     * 切换夜间反色（v1.7.0）。
+     *
+     * 必须清缓存：位图是渲染时就反好色的，缓存里存的是「结果」而不是参数。
+     * 不清的话，切换后当前页仍是旧图，用户会以为按钮没反应；
+     * 而且越是当前页（最热的那几页）越难被 LRU 淘汰，症状会一直挂着。
+     * 代价是重渲，但只有可见的那 1~3 页，用户感知是「闪一下」。
+     */
+    fun setPageInvert(invert: Boolean) {
+        if (pageInvert == invert) return
+        pageInvert = invert
+        clearPageCache()
+        // 清缓存不动 zoom，但要触发一次重组让页面重新走 ensureRendered
+        _state.value = _state.value.copy(pageInvert = invert, zoom = _state.value.zoom)
+    }
+
+    fun toggleChrome() = _state.value.let { _state.value = it.copy(chromeVisible = !it.chromeVisible) }    fun setChrome(visible: Boolean) = _state.value.let { _state.value = it.copy(chromeVisible = visible) }
     fun setZoom(z: Float) = _state.value.let { _state.value = it.copy(zoom = z.coerceIn(1f, zoomLimit)) }
 
     private var zoomLimit = 5f

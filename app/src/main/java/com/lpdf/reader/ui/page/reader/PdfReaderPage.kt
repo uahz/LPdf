@@ -72,6 +72,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lpdf.reader.AppContainer
@@ -83,6 +84,7 @@ import com.lpdf.reader.data.local.AppSettings
 import com.lpdf.reader.data.local.ReadingMode
 import com.lpdf.reader.data.local.SaveMode
 import com.lpdf.reader.data.pdf.PageRender
+import com.lpdf.reader.data.pdf.TextSelection
 import com.lpdf.reader.ui.glass.GlassIconButton
 import com.lpdf.reader.ui.glass.GlassPillButton
 import com.lpdf.reader.ui.glass.GlassProgressRing
@@ -331,10 +333,12 @@ fun PdfReaderPage(
                         "${state.currentPage + 1} / ${state.pageCount}"
                     } else "",
                     hasToc = state.toc.isNotEmpty(),
+                    night = state.pageInvert,
                     onBack = {
                         vm.flushAsync()
                         onClose()
                     },
+                    onNight = { vm.setPageInvert(!state.pageInvert) },
                     onToc = vm::toggleToc
                 )
             }
@@ -685,16 +689,41 @@ private fun PageItem(
                 }
             }
         } else {
-            AnnotationLayer(
-                render = current,
-                annotations = vm.annotationsOf(page),
-                tool = tool,
-                highlightColor = highlightColor,
-                inkWidth = inkWidth,
-                searchRects = vm.hitRectsOnPage(page),
-                activeSearchRects = vm.activeHitRectsOnPage(page),
-                onAdd = { vm.addAnnotation(page, it) }
-            )
+            Box {
+                AnnotationLayer(
+                    render = current,
+                    annotations = vm.annotationsOf(page),
+                    tool = tool,
+                    highlightColor = highlightColor,
+                    inkWidth = inkWidth,
+                    searchRects = vm.hitRectsOnPage(page),
+                    activeSearchRects = vm.activeHitRectsOnPage(page),
+                    onAdd = { vm.addAnnotation(page, it) }
+                )
+                // 文本选择层压在最上面，只在「浏览」状态下生效。
+                // 编辑模式下长按应该是画标注，而不是选字 —— 两层同时抢手势
+                // 会出现「想画一笔却弹出了复制」。
+                if (tool == EditorTool.NONE) {
+                    var sel by remember(page) { mutableStateOf<TextSelection?>(null) }
+                    TextSelectionLayer(
+                        page = page,
+                        aspect = current.aspect,
+                        accent = LocalColors.current.accent,
+                        selection = sel,
+                        resolve = { p, sx, sy, ex, ey -> vm.selectionBetween(p, sx, sy, ex, ey) },
+                        prepare = { p -> vm.textLayer(p) },
+                        onSelect = { sel = it },
+                        onCopy = {
+                            val n = sel?.let { vm.copySelection(it) } ?: 0
+                            if (n == 0) vm.toast("这一页没有可选中的文字，可能是扫描件")
+                            sel = null
+                        },
+                        onLongPressEmpty = {
+                            vm.toast("这一页没有文字层，可能是扫描件")
+                        }
+                    )
+                }
+            }
         }
     }
 }
@@ -710,6 +739,24 @@ private const val MAX_RENDER_RETRY = 8
 
 private data class PageBounds(val padH: Float, val screenW: Float)
 
+/**
+ * 把缩放后的平移量收进可视范围（v1.7.0）。
+ *
+ * 放大 s 倍后，内容边缘相对视图多出来 `(s-1)/2 × 尺寸` 的余量，
+ * 平移量超过这个值就只看到空白。这里按轴分别夹一下，
+ * 视图尺寸还没测出来（第一帧）时原样返回，避免把偏移清零。
+ */
+internal fun clampOffset(offset: Offset, zoom: Float, viewSize: IntSize): Offset {
+    if (viewSize.width <= 0 || viewSize.height <= 0) return offset
+    val s = zoom.coerceAtLeast(1f)
+    val maxX = viewSize.width * (s - 1f) / 2f
+    val maxY = viewSize.height * (s - 1f) / 2f
+    return Offset(
+        offset.x.coerceIn(-maxX, maxX),
+        offset.y.coerceIn(-maxY, maxY)
+    )
+}
+
 /** 单页模式用：整屏一页，居中 */
 @Composable
 private fun PageCanvas(
@@ -722,6 +769,9 @@ private fun PageCanvas(
     var zoom by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var render by remember(page) { mutableStateOf(vm.renderFor(page)) }
+    var viewSize by remember { mutableStateOf(IntSize.Zero) }
+    // 手指在屏幕上的位置（相对内容区），缩放时用来当锚点
+    var focus by remember { mutableStateOf(Offset.Zero) }
 
     LaunchedEffect(page) {
         vm.ensureRendered(page, widthPx)
@@ -731,10 +781,29 @@ private fun PageCanvas(
 
     Box(
         modifier
+            .onSizeChanged { viewSize = it }
             .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoomChange, _ ->
-                    zoom = (zoom * zoomChange).coerceIn(1f, maxZoom)
-                    offset = if (zoom <= 1.02f) Offset.Zero else offset + pan
+                detectTransformGestures { centroid, pan, zoomChange, _ ->
+                    val oldZoom = zoom
+                    val newZoom = (oldZoom * zoomChange).coerceIn(1f, maxZoom)
+                    // 以手指为中心缩放（v1.7.0）。
+                    //
+                    // 旧写法是 `offset += pan`，缩放时画面以左上角为原点整体放大：
+                    // 你捏合想看清的那个字会从手指下面滑走，越放越偏。
+                    // 正确做法是把「手指所指的内容点」钉在原地：
+                    //   内容坐标 c = (p - t) / s，要求缩放后 c 仍落在 p 处
+                    // ⇒ 新平移 t' = p - c·s' = p - (p - t)·s'/s
+                    // 再叠上这一帧的 pan（双指平移）。
+                    val c = centroid
+                    val ratio = if (oldZoom > 0.01f) newZoom / oldZoom else 1f
+                    offset = c - (c - offset) * ratio + pan
+                    zoom = newZoom
+                    // 回到 1x 时把平移清零，避免残留偏移让页面贴边
+                    if (newZoom <= 1.001f) offset = Offset.Zero
+                    // 边界：放大后最多往每个方向拖 (s-1)/2 × 视图尺寸。
+                    // 旧版没有这层约束，可以一直把页面拖出屏幕外，只剩一片背景色，
+                    // 而且没有任何回弹能把它找回来。
+                    offset = clampOffset(offset, newZoom, viewSize)
                 }
             },
         contentAlignment = Alignment.Center
@@ -1062,7 +1131,9 @@ private fun ReaderTopBar(
     title: String,
     subtitle: String,
     hasToc: Boolean,
+    night: Boolean,
     onBack: () -> Unit,
+    onNight: () -> Unit,
     onToc: () -> Unit
 ) {
     val colors = LocalColors.current
@@ -1099,6 +1170,14 @@ private fun ReaderTopBar(
                 }
             }
         }
+        Spacer(Modifier.width(8.dp))
+        // 夜间模式：图标随状态切换（亮时显示月亮=「点了会变暗」）
+        GlassIconButton(
+            if (night) LIcon.Sun else LIcon.Moon,
+            if (night) "切换到日间" else "夜间模式",
+            onNight,
+            size = 40.dp
+        )
         Spacer(Modifier.weight(1f))
         if (hasToc) {
             GlassIconButton(LIcon.List, "目录", onToc, size = 40.dp)

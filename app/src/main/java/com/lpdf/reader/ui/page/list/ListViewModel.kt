@@ -168,6 +168,59 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
 
     // ---------------------------------------------------------------- 缩略图 / 页数
 
+    /**
+     * 缩略图预生成队列（v1.7.0）。
+     *
+     * 首屏只 enrich 可见的几项，往下一滑就是一片灰块，每张要等 100~300ms。
+     * 这里把「接下来会出现的几项」提前排进去，串行生成。
+     */
+    private val prewarmer by lazy {
+        com.lpdf.reader.data.local.ThumbnailPrewarmer(
+            context = container.appContext(),
+            store = container.thumbnails,
+            onReady = { id, path, color ->
+                if (id == null || path == null) return@ThumbnailPrewarmer
+                withContext(AppDispatchers.main) {
+                    val thumbMap = _state.value.thumbs.toMutableMap()
+                    thumbMap[id] = path
+                    _state.value = _state.value.copy(
+                        items = _state.value.items.map { it2 ->
+                            if (it2.id == id) it2.copy(highlightColor = color ?: it2.highlightColor)
+                            else it2
+                        },
+                        thumbs = thumbMap
+                    )
+                }
+                Unit
+            }
+        )
+    }
+
+    /**
+     * 预热一批缩略图。调用方（列表页）传入当前可见项之后的那几项。
+     *
+     * 已经生成过的项在预生成器内部被去重，所以重复调用不会重复渲染 ——
+     * 滚动时每帧都会回调可见范围，这里不设防会瞬间排爆队列。
+     */
+    fun prewarm(items: List<com.lpdf.reader.core.model.PdfItem>) {
+        if (items.isEmpty()) return
+        prewarmer.enqueue(
+            items.filter { !container.thumbnails.has(container.thumbnails.cacheKey(it.id, it.lastModified)) }
+                .map {
+                    com.lpdf.reader.data.local.ThumbnailPrewarmer.Task(
+                        id = it.id,
+                        uri = it.uri,
+                        lastModified = it.lastModified
+                    )
+                }
+        )
+    }
+
+    override fun onCleared() {
+        prewarmer.cancel()
+        super.onCleared()
+    }
+
     private fun enrich(item: PdfItem) {
         synchronized(enrichQueued) {
             if (!enrichQueued.add(item.id)) return

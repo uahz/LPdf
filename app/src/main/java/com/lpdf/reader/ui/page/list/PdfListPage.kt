@@ -46,7 +46,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -284,6 +286,25 @@ fun PdfListPage(
                             onRescan = { vm.scan() }
                         )
                     } else {
+                        // 预热「马上会滑到」的那几项（v1.7.0）。
+                        //
+                        // 只看可见范围的后面 12 项：再多就是在为「可能永远不会看到」
+                        // 的文档白开 PDF。快滑时本次预热会被下一次覆盖，
+                        // 但预生成器内部按 id 去重且串行，滑得快只会跳过中间项，
+                        // 不会堆积任务。
+                        LaunchedEffect(listState, items) {
+                            snapshotFlow {
+                                val info = listState.layoutInfo
+                                val last = info.visibleItemsInfo.lastOrNull()?.index ?: return@snapshotFlow -1
+                                last
+                            }.collect { last ->
+                                if (last >= 0) {
+                                    vm.prewarm(
+                                        items.drop(last + 1).take(PREWARM_AHEAD)
+                                    )
+                                }
+                            }
+                        }
                         LazyColumn(
                             state = listState,
                             contentPadding = PaddingValues(
@@ -928,3 +949,6 @@ private fun PasswordSheet(
         }
     }
 }
+
+/** 预生成缩略图的前瞻项数（v1.7.0） */
+private const val PREWARM_AHEAD = 12

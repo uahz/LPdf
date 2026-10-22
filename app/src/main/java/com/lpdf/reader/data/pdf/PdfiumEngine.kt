@@ -275,6 +275,7 @@ object PdfiumEngine {
         suspend fun renderTiles(
             pageIndex: Int,
             plan: TilePlan,
+            invert: Boolean = false,
             onTile: suspend (Tile) -> Unit
         ): PdfResult<Int> = withContext(Dispatchers.IO) {
             lock.withLock {
@@ -310,6 +311,15 @@ object PdfiumEngine {
                                 0f, 0f, r.width.toFloat(), r.height.toFloat()
                             )
                             page.renderPageBitmap(bmp, matrix, clip, true, true, 0, 0)
+
+                            // 夜间模式反色（v1.7.0）。必须在这里做，不能在 UI 层叠滤色片：
+                            // 滤色片是「把整页亮度压下去」，白底变深灰、黑字变更黑，
+                            // 对比度反而更低，小字直接糊成一片。
+                            // 真正的夜间阅读是**反色**：纸变黑、字变白，对比度保持。
+                            // 而且这里只处理底图位图，标注是另一层矢量绘制，颜色不受影响。
+                            if (invert) {
+                                InvertFilter.apply(bmp)
+                            }
 
                             onTile(
                                 Tile(
@@ -390,6 +400,84 @@ object PdfiumEngine {
                     )
                 } catch (t: Throwable) {
                     PdfResult.Failure(PdfError.Unknown("读取页面尺寸失败", t))
+                }
+            }
+        }
+
+        /**
+         * 取整页文字层（v1.7.0，文本选择用）。
+         *
+         * 返回**每个字符**的归一化矩形、所属行号、以及字符本身。
+         * 一次取全页而不是「按选区现查」的原因：
+         *
+         * - 用户拖动手柄时每次移动都要重算选区，逐次进 native 会明显卡顿；
+         * - 长按命中之后，选区延展到哪里完全是本地计算，手感才跟得上手指。
+         *
+         * 一页 A4 正文约 2000~3000 个字符，每个字符一条 `CharBox`
+         * （3 个 Float + 1 个 Int + 1 个 Char，约 40 字节），单页 100KB 上下。
+         * 只缓存当前页，翻页即弃。
+         *
+         * 行号判定：两个字符中心点的纵坐标差小于半个字高就视为同一行。
+         * PDF 没有「行」这个概念，只能这样归并 —— 用字高的比例而不是绝对值，
+         * 因为字号在页面里并不统一（标题 24pt、正文 10pt）。
+         */
+        suspend fun textLayer(pageIndex: Int): PdfResult<TextLayer> = withContext(Dispatchers.IO) {
+            lock.withLock {
+                if (closed) return@withLock PdfResult.Failure(PdfError.Unknown("文档已关闭"))
+                if (pageIndex < 0 || pageIndex >= pageCount) {
+                    return@withLock PdfResult.Failure(PdfError.NotFound("页码超出范围"))
+                }
+                var page: PdfPage? = null
+                var tp: PdfTextPage? = null
+                try {
+                    page = openPageLocked(pageIndex)
+                    val pageW = page.getPageWidthPoint().toFloat().coerceAtLeast(1f)
+                    val pageH = page.getPageHeightPoint().toFloat().coerceAtLeast(1f)
+                    tp = page.openTextPage()
+                    val n = tp.textPageCountChars()
+                    if (n <= 0) return@withLock PdfResult.Success(TextLayer(pageIndex, emptyList(), 0))
+
+                    val boxes = ArrayList<CharBox>(minOf(n, 8192))
+                    var text = StringBuilder()
+                    var line = 0
+                    var lastMidY = Float.NaN
+                    var lastH = 0f
+                    for (i in 0 until n) {
+                        val r = tp.textPageGetCharBox(i)
+                        // 没有可见框的字符（换行、空格、零宽）跳过，但保留文字，
+                        // 否则复制出来的句子会丢掉空格粘成一团
+                        val ch = runCatching { tp.textPageGetUnicode(i) }.getOrNull() ?: '\u0000'
+                        if (r == null || r.width() <= 0f || r.height() <= 0f) {
+                            if (ch != '\u0000') text.append(ch)
+                            continue
+                        }
+                        text.append(ch)
+                        val h = r.height()
+                        val midY = (r.top + r.bottom) / 2f
+                        // 同一行的判定要留一点容差：斜体、上标会让字框上下错开
+                        if (lastMidY.isNaN() || kotlin.math.abs(midY - lastMidY) > lastH * 0.5f) {
+                            line++
+                        }
+                        lastMidY = midY
+                        lastH = h
+                        boxes += CharBox(
+                            ch = ch,
+                            line = line,
+                            left = (r.left / pageW).coerceIn(0f, 1f),
+                            top = (r.top / pageH).coerceIn(0f, 1f),
+                            right = (r.right / pageW).coerceIn(0f, 1f),
+                            bottom = (r.bottom / pageH).coerceIn(0f, 1f)
+                        )
+                    }
+                    PdfResult.Success(TextLayer(pageIndex, boxes, line))
+                } catch (e: SecurityException) {
+                    PdfResult.Failure(PdfError.PermissionDenied())
+                } catch (t: Throwable) {
+                    if (t is kotlinx.coroutines.CancellationException) throw t
+                    PdfResult.Failure(PdfError.Unknown("读取文字层失败", t))
+                } finally {
+                    runCatching { tp?.close() }
+                    // 页面句柄是会话级 LRU 缓存的，这里不能关
                 }
             }
         }

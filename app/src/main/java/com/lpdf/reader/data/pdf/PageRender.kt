@@ -49,6 +49,13 @@ data class PageRender(
     val heightPx: Int,
     /** true = 因超出分块预算，整体等比缩小后渲染，清晰度下降 */
     val degraded: Boolean,
+    /**
+     * true = 底图已反色（夜间模式，v1.7.0）。
+     *
+     * 缓存按页号索引，不含渲染参数，所以这一位是「这份缓存还能不能用」的判据之一：
+     * 用户切换夜间模式后，旧位图必须重新渲染而不是继续显示。
+     */
+    val inverted: Boolean = false,
     /** 已就绪的块，按 index 升序 */
     val tiles: List<Tile> = emptyList(),
     /** 计划总块数；降级页恒为 1 */
