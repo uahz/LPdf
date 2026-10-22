@@ -1,7 +1,7 @@
 # LPdf 开发进度
 
-> 更新时间：2026-10-22 19:20
-> 当前版本：**v1.7.2**（versionCode 172）
+> 更新时间：2026-10-22 20:35
+> 当前版本：**v1.7.3**（versionCode 173）
 > 仓库：https://github.com/uahz/LPdf
 
 ---
@@ -10,15 +10,15 @@
 
 | 指标 | 数值 |
 | --- | --- |
-| 当前版本 | v1.7.2 |
-| versionCode | 172 |
-| 最近发布 | [v1.7.2](https://github.com/uahz/LPdf/releases/tag/v1.7.2)（2026-10-22） |
-| 单测数量 | **206 项，全绿** |
+| 当前版本 | v1.7.3 |
+| versionCode | 173 |
+| 最近发布 | [v1.7.3](https://github.com/uahz/LPdf/releases/tag/v1.7.3)（2026-10-22） |
+| 单测数量 | **221 项，全绿** |
 | Lint | **0 error / 11 warning**（已进 CI，`abortOnError = true`） |
-| APK 体积 | **22.35 MB**（v1.7.0 为 29.6 MB，减 23.9%） |
+| APK 体积 | **22.35 MB**（22,346,469 字节） |
 | CI 签名 | ✅ 已配置 4 个 secrets，CI 产物为签名包 |
-| 源码规模 | 61 个 Kotlin 文件 / 15777 行 |
-| 测试文件 | 31 个 |
+| 源码规模 | 62 个 Kotlin 文件 / 16,390 行 |
+| 测试文件 | 32 个 |
 | 签名 | RSA 4096，SHA-256 `1590d022…`，自 1.1.0 未变，可跨版本覆盖升级 |
 
 ### 版本时间线
@@ -35,13 +35,83 @@
 | v1.6.1 | 8 个假开关修复 + 6 处自查缺陷 | ✅ 已发布 |
 | v1.7.0 | 阅读体验增强（文本选择 / 缩放锚点 / 夜间反色 / 缩略图预热） | ✅ 已发布 |
 | v1.7.1 | 体积与质量收尾（删 PDFBox / Lint 进 CI） | ✅ 已发布 |
-| **v1.7.2** | **底栏重做（对齐 iOS 26）+ 页面宽度自适应 + 遮挡修复** | ✅ **已发布** |
+| v1.7.2 | 底栏重做（对齐 iOS 26）+ 页面宽度自适应 + 遮挡修复 | ✅ 已发布 |
+| **v1.7.3** | **打开 PDF 自动适配屏幕（单页一屏看全 / 连续首屏适配）+ 页高修正** | ✅ **已发布** |
 | v1.8.0 | 元数据编辑 | ⬜ 待开始 |
 | v2.0.0 | 多语言 + 性能与大文件 | ⬜ 待开始 |
 
 ---
 
-## 二、v1.7.2 已完成的工作（本轮）
+## 二、v1.7.3 已完成的工作（本轮）
+
+用户反馈：「先把打开 PDF 时自动适配对应大小给做好，然后再继续开发 V1.8.0」。
+
+v1.7.2 只修了**横向**（页面左右不再各空一大块），纵向完全没人管。本轮补齐纵向，并把策略抽成可单测的纯函数。
+
+### 1. 单页模式：一屏看全，不被玻璃条压住 ✅
+
+**问题**：旧实现 `minOf(整屏宽, 整屏高 / aspect)` 把「整屏」当可用区，但顶部工具条、底部页码胶囊都压在这块区域上。360dp 屏上，一条工具条（约 60dp）+ 底部胶囊（约 100dp）吃掉 160dp 可见高度，页面头尾正好被盖住 —— 这就是「打开只剩中间一小条」的观感来源。
+
+**改法**：先扣掉玻璃条占位，再算页面尺寸。
+
+```kotlin
+val usableHeightPx = PageFit.contentHeightPx(heightPx, density, chromeVisible)
+val targetWidthPx = PageFit.fitWidthPx(contentWidthPx, usableHeightPx, aspect)
+```
+
+关键点是**渲染宽度也用这个值**，不是内容区宽度。否则位图按满宽渲染、显示时再缩到 fitW，等于多渲一倍像素，翻开第一页还要多等一倍时间。
+
+隐藏工具栏时 `usableHeightPx` 自动变大，页面随之放大 —— 这是 iOS / 微信读书的手感，不是额外开关。
+
+### 2. 连续模式：首屏一屏一页 ✅
+
+**问题**：连续模式按宽度铺满，A4 在竖屏上必然高过一屏，首屏只能看到「本页上半截 + 下一页开头一道缝」。
+
+**改法**：只在首屏收紧宽度，`PageFit.firstScreenWidthPx()` 一次算干净：
+
+- 满宽装得下 → 原样返回，不动
+- 满宽装不下、缩完还读得出 → 缩到「一屏恰好一页」
+- 缩完窄到读不出（50:1 的 CAD 图）→ 不缩，保持满宽交给纵向滚动
+
+这里踩了一个坑值得记：**最初写成「一直检查 `atTop`」**，结果收缩后页面不再溢出、滚动条永远停在顶端，`atTop` 恒为 true，页面再也回不到铺满。改成 `firstFitLatched` 一次性锁定的状态才是对的。
+
+另外续读时跳过首屏适配 —— 用户看到的不是封面，缩成「一屏一页」没有意义。
+
+### 3. 连续模式页高多算一个 padding ✅
+
+**问题**：`PageItem` 里 `pageHeightDp = areaWidthPx * aspect`，但外层明明有 `padding(horizontal = horizontalPadding)`。算出来的占位高比实际位图高 `2 × padding × aspect`，A4 在小屏上就是多出约 17px 的空白页脚，每页底部都空一截。
+
+**改法**：用**实际显示宽度**推页高：
+
+```kotlin
+val visibleWidthPx = areaWidthPx - horizontalPadding.toPx() * 2f
+val pageHeightDp = (visibleWidthPx * aspect / density).dp
+```
+
+### 4. 策略抽成纯函数 `PageFit` ✅
+
+新增 `ui/page/reader/PageFit.kt`（约 150 行），把留白档位、玻璃条占位、一屏宽度计算全部收进来。好处有三：
+
+1. 连续模式和单页模式共用同一份数字，不再各写一份
+2. 可以直接单测 —— 覆盖 360×640dp、360×800dp、分屏、平板、50:1 长页等屏型
+3. 改 UI 高度时只需同步 `TOP_CHROME_DP` / `BOTTOM_CHROME_DP` 两个常量
+
+新增 `PageFitTest`（14 项），把「各种屏型下页面该多大」写成断言。这是「改对了」和「只是没报错」的区别。
+
+### 本轮验证结果
+
+| 项 | 结果 |
+| --- | --- |
+| `compileDebugKotlin` | ✅ 成功，无新增警告 |
+| `testDebugUnitTest` | ✅ **221 项，0 失败**（v1.7.2 为 206 项，本轮 `PageFitTest` 新增 15 项） |
+| `lintDebug` | ✅ **0 error / 11 warning**（与 v1.7.2 持平） |
+| `assembleRelease` | ✅ 22,346,469 字节 |
+| 包信息 | `versionCode=173` / `versionName=1.7.3` |
+| 签名 | SHA-256 `1590d022…`，与 1.1.0 以来一致，可覆盖升级 |
+
+---
+
+## 三、v1.7.2 已完成的工作
 
 三张真机截图驱动的修正版本。用户原话：
 
@@ -165,7 +235,7 @@ private fun tabCenterY(label: String): Float? {
 
 ---
 
-## 三、v1.7.1 已完成的工作
+## 四、v1.7.1 已完成的工作
 
 收尾性质，只做"减重 + 把静态检查真正跑起来"两件事，但过程中挖出的问题比预期多。
 
@@ -345,7 +415,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 四、v1.7.0 已完成的工作
+## 五、v1.7.0 已完成的工作
 
 | 功能 | 实现要点 |
 | --- | --- |
@@ -356,7 +426,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 五、网盘同步状态
+## 六、网盘同步状态
 
 **v1.5.2 起的阻塞已解除**（原为 COS 403 `SignatureDoesNotMatch`，平台临时凭证失效，服务端侧问题）。
 
@@ -382,7 +452,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 六、后续版本计划
+## 七、后续版本计划
 
 ### v1.8.0 · 元数据编辑
 
@@ -410,7 +480,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 七、遗留待办（非阻塞）
+## 八、遗留待办（非阻塞）
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
@@ -420,7 +490,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 八、已知限制
+## 九、已知限制
 
 1. **渲染**：极端长页（如 50:1 的 CAD 图）会整体等比降级，保宽高比但牺牲清晰度 —— 这是 4 块上限的必然结果
 2. **玻璃**：无 AGSL 支持的设备退化为纯模糊 + 底色，强度全局归零

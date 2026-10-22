@@ -134,6 +134,8 @@ fun PdfReaderPage(
     val colors = LocalColors.current
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    // 首屏「一屏一页」是否已经被跳过（续读 / 跳页时跳过）。见 needFirstFit 段注释。
+    var skipFirstFit by remember { mutableStateOf(false) }
 
     // 设置项要先于 bind 落地：open() 里的「是否恢复上次进度」直接读
     // rememberPosition，晚一拍就会用默认值 true 走一遍错误的分支。
@@ -196,6 +198,9 @@ fun PdfReaderPage(
 
     // 自动跟随当前页
     LaunchedEffect(state.currentPage, state.pageCount) {
+        // v1.7.3：续读进度可能落在很靠后的页，此时首屏不算「第一页」，
+        // 不该因为它把页面缩成一屏一页（用户看到的是续读页，不是封面）。
+        if (state.pageCount > 0 && state.currentPage != 0) skipFirstFit = true
         if (state.pageCount > 0 && listState.firstVisibleItemIndex != state.currentPage) {
             runCatching { listState.scrollToItem(state.currentPage) }
         }
@@ -223,6 +228,9 @@ fun PdfReaderPage(
             // 实测约束拿到的是**物理像素**，之后不再有任何 dp/density 换算，
             // 从源头消灭「宽度被放大」这条路径（sanitizePageSize 只作兜底）。
             var contentWidthPx by remember { mutableIntStateOf(0) }
+            // 内容区**可用高度**。单页模式「一屏看全」全靠它：
+            // 高度决定了页面能放多大，只看宽度的话 A4 必然撑出屏幕。
+            var contentHeightPx by remember { mutableIntStateOf(0) }
             // 同一份宽度的 dp 值，供分档留白判断用。
             // 直接由 px ÷ density 得到，不使用 Configuration.screenWidthDp ——
             // 后者在分屏 / 折叠屏下与实测宽度不一致（见上方注释）。
@@ -230,7 +238,10 @@ fun PdfReaderPage(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .onSizeChanged { if (it.width > 0) contentWidthPx = it.width }
+                    .onSizeChanged {
+                        if (it.width > 0) contentWidthPx = it.width
+                        if (it.height > 0) contentHeightPx = it.height
+                    }
             ) {
             if (contentWidthPx == 0) {
                 // 第一帧拿不到尺寸：先不渲染，避免用错误宽度先渲一遍再重渲
@@ -284,7 +295,9 @@ fun PdfReaderPage(
                             vm = vm,
                             page = state.currentPage,
                             widthPx = contentWidthPx,
+                            heightPx = contentHeightPx,
                             maxZoom = settings.zoomLimit.toFloat(),
+                            chromeVisible = state.chromeVisible,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -301,9 +314,47 @@ fun PdfReaderPage(
                     //   其余                          → 10dp，留出视觉呼吸
                     // 换算成 px 后传给渲染层，渲染宽度与显示宽度严格一致，
                     // 不会出现「按 1080 渲完塞进 920 的框里」被二次缩小的糊边。
-                    val hPad = if (contentWidthDp < 360.dp) 6.dp else 10.dp
+                    //
+                    // v1.7.3：档位收敛进 [PageFit]，与单页模式共用同一份策略，
+                    // 避免两处各写一份数字、改一处漏一处。
+                    val hPad = PageFit.horizontalPadding(contentWidthDp.value).dp
                     val hPadPx = with(LocalDensity.current) { hPad.toPx() }
-                    val pageWidthPx = (contentWidthPx - hPadPx * 2).toInt().coerceAtLeast(240)
+                    val fullWidthPx = (contentWidthPx - hPadPx * 2).toInt().coerceAtLeast(240)
+                    // v1.7.3：连续模式首屏「一屏一页」。
+                    //
+                    // 连续模式天生按宽铺满，A4 在竖屏上必然高过一屏 —— 首屏只能看到
+                    // 本页上半截 + 下一页开头，观感就是「页面在中间一小条里滚动」。
+                    // 这里只在**首屏**（还没滚动过）收紧宽度，让一整页落在可见区内；
+                    // 用户第一次滚动之后立刻恢复铺满，不去干扰正常的连续阅读。
+                    val densityNow = LocalDensity.current.density
+                    val viewportH = PageFit.contentHeightPx(
+                        availableHeightPx = contentHeightPx,
+                        density = densityNow,
+                        chromeVisible = state.chromeVisible
+                    )
+                    val firstAspect = remember(state.docKey) {
+                        vm.renderFor(state.currentPage)?.aspect ?: 1.4142f
+                    }
+                    val atTop = listState.firstVisibleItemIndex == 0 &&
+                        listState.firstVisibleItemScrollOffset < 8
+                    val needFirstFit = state.pageCount > 0 && contentHeightPx > 0 && atTop &&
+                        !PageFit.pageFitsViewport(fullWidthPx, firstAspect, viewportH)
+                    // 首屏收缩开关：只在打开文档那一刻判定一次，之后不再重算。
+                    //
+                    // 不能「一直看 atTop」：收缩后页面不再溢出，滚动条永远停在顶端，
+                    // atTop 就不会变 false —— 开关一旦生效就再也回不到铺满，
+                    // 用户无论怎么滑都还是缩小的页面。所以这里锁定成一个状态。
+                    var firstFitLatched by remember(state.docKey) { mutableStateOf<Boolean?>(null) }
+                    LaunchedEffect(state.docKey, state.pageCount, contentHeightPx, viewportH, fullWidthPx) {
+                        if (firstFitLatched == null && state.pageCount > 0 && contentHeightPx > 0) {
+                            firstFitLatched = needFirstFit && !skipFirstFit
+                        }
+                    }
+                    val pageWidthPx = if (firstFitLatched == true) {
+                        PageFit.firstScreenWidthPx(fullWidthPx, viewportH, firstAspect)
+                    } else {
+                        fullWidthPx
+                    }
                     LazyColumn(
                         state = listState,
                         contentPadding = PaddingValues(
@@ -668,8 +719,16 @@ private fun PageItem(
     // 旧版写死 A4 的 1.414f，超长页会先占一个矮框，渲染完突然撑高 ——
     // 列表整段跳动，用户还会以为点错了位置。
     val aspect = render?.aspect ?: 1.414f
+    // v1.7.3：高度由「实际显示的宽度」推出，不用「宽 − 留白 × 2」再减一次。
+    //
+    // 旧写法 `areaWidthPx * aspect` 假设外层没有 padding，但外层明明有
+    // `padding(horizontal = horizontalPadding)` —— 于是算出来的高度比实际
+    // 画出来的位图高 2×padding×aspect。A4（1.414）在小屏上就是多出 17px 的空白页脚，
+    // 连续滚动时每页底部都空一截，看起来像「页面没对齐」。
     val pageHeightDp = with(LocalDensity.current) {
-        (areaWidthPx * aspect / density).dp
+        val visibleWidthPx = (areaWidthPx - horizontalPadding.toPx() * 2f)
+            .coerceAtLeast(1f)
+        (visibleWidthPx * aspect / density).dp
     }
 
     Box(
@@ -781,7 +840,11 @@ private fun PageCanvas(
     vm: ReaderViewModel,
     page: Int,
     widthPx: Int,
+    /** 内容区可用高度（px）。决定「一屏看全」的页面宽度上限 */
+    heightPx: Int,
     maxZoom: Float,
+    /** 玻璃 UI 是否可见；隐藏时页面可以长高一整条工具栏的高度 */
+    chromeVisible: Boolean,
     modifier: Modifier = Modifier
 ) {
     var zoom by remember { mutableFloatStateOf(1f) }
@@ -791,8 +854,22 @@ private fun PageCanvas(
     // 手指在屏幕上的位置（相对内容区），缩放时用来当锚点
     var focus by remember { mutableStateOf(Offset.Zero) }
 
-    LaunchedEffect(page) {
-        vm.ensureRendered(page, widthPx)
+    val density = LocalDensity.current.density
+    // v1.7.3：按「内容区宽 + 扣掉玻璃条的高」算出一屏能放下多大的页面。
+    // 渲染宽度必须用这个值而不是内容区宽度 —— 否则位图按满宽渲染、
+    // 显示时又缩到 fitW，等于白白多渲一倍像素，翻开第一页还要多等一倍时间。
+    val aspectForFit = render?.aspect ?: 1.414f
+    val usableHeightPx = PageFit.contentHeightPx(
+        availableHeightPx = if (heightPx > 0) heightPx else viewSize.height,
+        density = density,
+        chromeVisible = chromeVisible
+    )
+    val targetWidthPx = if (widthPx > 0) {
+        PageFit.fitWidthPx(widthPx, usableHeightPx, aspectForFit)
+    } else 0
+
+    LaunchedEffect(page, targetWidthPx) {
+        if (targetWidthPx > 0) vm.ensureRendered(page, targetWidthPx)
         render = vm.renderFor(page)
     }
     val z by animateFloatAsState(zoom, Motion.standard, label = "zoom")
@@ -830,11 +907,17 @@ private fun PageCanvas(
         if (current == null || current.tiles.isEmpty()) {
             GlassProgressRing()
         } else {
-            // 单页模式：按真实宽高比自适应填充，用同一套 tile 绘制
+            // 单页模式：一屏看全（v1.7.3）。
+            //
+            // 旧实现用 `minOf(整屏宽, 整屏高 / aspect)`，把「整屏」当可用区：
+            // 顶部工具条与底部页码胶囊压在最上面，页面头尾正好被它们盖住 ——
+            // 用户看到的就是「打开只剩中间一小条」。
+            // 现在高度先扣掉 [PageFit.TOP_CHROME_DP] + [PageFit.BOTTOM_CHROME_DP]，
+            // 页面只落在没有任何 UI 遮挡的区域里；隐藏工具栏时可用区自动变大，
+            // 页面随之放大，这也是 iOS / 微信读书的手感。
             BoxWithConstraints(
                 Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 8.dp)
                     .graphicsLayer {
                         scaleX = z
                         scaleY = z
@@ -843,17 +926,22 @@ private fun PageCanvas(
                     },
                 contentAlignment = Alignment.Center
             ) {
-                val wPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
-                val hPx = constraints.maxHeight.toFloat().coerceAtLeast(1f)
-                // 等比缩放：宽高各让一步，装不下就缩
-                val fitW = minOf(wPx, hPx / current.aspect.coerceAtLeast(0.01f))
+                val safeAspect = current.aspect.coerceAtLeast(0.01f)
+                // 取负约束（Infinity）在压缩时会出现，coerceAtLeast 兜住
+                val boxW = constraints.maxWidth.let { if (it == Int.MAX_VALUE) widthPx else it }
+                    .toFloat().coerceAtLeast(1f)
+                val fitW = PageFit.fitWidthPx(
+                    contentWidthPx = boxW.roundToInt(),
+                    contentHeightPx = usableHeightPx,
+                    aspect = safeAspect
+                ).toFloat()
                 val drawW = with(LocalDensity.current) { fitW.toDp() }
                 TileCanvas(
                     render = current,
                     contentDescription = "第 ${page + 1} 页",
                     modifier = Modifier
                         .width(drawW)
-                        .aspectRatio(1f / current.aspect.coerceAtLeast(0.01f))
+                        .aspectRatio(1f / safeAspect)
                 )
             }
         }

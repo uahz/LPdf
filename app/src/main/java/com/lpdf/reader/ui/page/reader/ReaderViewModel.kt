@@ -421,6 +421,10 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
         // ② 先把「占位页」放进缓存：UI 立刻拿到真实宽高比，
         //    列表不会再从 A4 比例跳到真实比例（那种跳动比转圈更让人困惑）
+        //
+        // 注意 [PageRender.widthPx] 表示的是**渲染坐标系**宽度（tile 用它换算 dst），
+        // 不是屏幕显示宽度 —— UI 那边按容器实测尺寸等比映射。
+        // 所以这里如实写 plan 的值，不能替换成展示宽，否则 tile 会被二次缩放变形。
         synchronized(pageCache) {
             val cur = pageCache[page]
             if (cur == null || cur.tiles.isEmpty()) {

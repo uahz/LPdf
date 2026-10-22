@@ -1,4 +1,4 @@
-# LPdf 1.7.2 · Android PDF 阅读器
+# LPdf 1.7.3 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.7.2-release.apk
+adb install -r dist/LPdf-1.7.3-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -27,7 +27,7 @@ export JAVA_HOME=/opt/jdk21
 export ANDROID_HOME=/opt/android-sdk
 ./gradlew :app:assembleRelease       # 产物 app/build/outputs/apk/release/
 ./gradlew :app:assembleDebug         # 仅供本地调试，不发布
-./gradlew :app:testDebugUnitTest     # 206 个单测
+./gradlew :app:testDebugUnitTest     # 221 个单测
 ./gradlew :app:lintDebug             # 静态检查，0 error 才算过
 ```
 
@@ -36,6 +36,32 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.7.3 变更
+
+### 打开 PDF 自动适配屏幕
+
+1.7.2 只修了横向（左右不再各空一大块），纵向没人管 —— 打开文档第一眼仍是「中间一小条」。这一版补齐纵向：
+
+- **单页模式**：先扣掉顶部工具条与底部页码胶囊的占位，再按「宽不够按宽、高不够按高」算页面尺寸，保证整页完整落在没有任何 UI 压着的区域里。隐藏工具栏时可用区变大，页面自动跟着放大
+- **连续模式**：首屏若按满宽放不下一整页，自动缩到「一屏恰好一页」；用户开始滚动后不再干预。50:1 这类超长页不会被缩成一条缝，保持满宽交给纵向滚动
+- 渲染宽度与最终显示宽度严格一致 —— 不会出现「按满宽渲完再缩一半显示」，翻开第一页不必多等一倍
+
+### 修掉页高多算一个 padding
+
+连续模式里页面占位高算的是 `可用宽 × 宽高比`，但外层还有左右留白。结果占位框比实际位图高出一截，A4 在小屏上每页底部都空约 17px —— 看起来像「页面没对齐」。
+
+### 策略抽成纯函数并加测试
+
+新增 `ui/page/reader/PageFit.kt`，把留白档位、玻璃条占位、一屏尺寸计算收成纯函数，连续与单页模式共用。配套 `PageFitTest` 15 项，覆盖 360×640dp、360×800dp、分屏半屏、平板横屏、50:1 超长页等屏型 —— 「各种屏幕上页面该多大」从此有可执行断言，不再只能靠真机肉眼看。
+
+| 项 | 结果 |
+| --- | --- |
+| 单测 | **221 项，0 失败** |
+| Lint | **0 error / 11 warning** |
+| 包信息 | `versionCode=173` / `versionName=1.7.3` |
+| APK | 22,346,469 字节 |
+| 签名 | 与 1.1.0 以来一致，可覆盖升级 |
 
 ## 1.7.2 变更
 
