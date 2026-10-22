@@ -274,7 +274,8 @@ fun SettingsPage(
                     GlassGroup(title = "编辑") {
                         SegRow(
                             title = "默认保存方式",
-                            subtitle = "覆盖会直接写回原文件（不可撤销）",
+                            subtitle = "覆盖会直接写回原文件（不可撤销）。" +
+                                "系统媒体库里的 PDF 只有只读权限，会自动改用另存为",
                             options = listOf("另存为", "覆盖原文件"),
                             selected = if (settings.saveMode == SaveMode.SAVE_AS) 0 else 1,
                             onSelect = { i ->
@@ -303,12 +304,16 @@ fun SettingsPage(
                             title = "墨迹粗细",
                             valueText = String.format(java.util.Locale.US, "%.1f", settings.defaultInkWidth),
                             value = settings.defaultInkWidth,
-                            range = 1f..8f,
+                            // 默认值 2f 在 range 之外，拖动会先吸附到 1f/8f —— 用户会以为坏了。
+                            // 范围取 0.5~24f，与 ViewModel 的 coerceIn 保持一致
+                            range = 0.5f..24f,
                             onValue = { v -> update { it.copy(defaultInkWidth = v) } }
                         )
                         GlassDivider()
                         SegRow(
                             title = "撤销步数",
+                            // 单位是「条」，不是历史步数：单页最多保留多少条标注，
+                            // 超出的旧标注会被丢弃。写成「步」会让用户以为是撤销次数
                             options = listOf("20", "50", "100"),
                             selected = when {
                                 settings.undoLimit <= 20 -> 0
@@ -318,6 +323,12 @@ fun SettingsPage(
                             onSelect = { i ->
                                 update { it.copy(undoLimit = listOf(20, 50, 100)[i]) }
                             }
+                        )
+                        Text(
+                            "单页最多保留的标注条数。调小会丢弃该页更早的标注，且立即生效。",
+                            style = LType.Micro,
+                            color = LocalColors.current.secondary,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
                         )
                     }
                 }

@@ -159,10 +159,22 @@ val LocalType = staticCompositionLocalOf { LType }
 fun LPdfTheme(
     dark: Boolean,
     glass: GlassSpec = GlassSpec(),
+    /**
+     * 强调色覆盖（v1.6.1）。
+     *
+     * 设置里的「高亮色取自文档」打开时，调用方把当前文档封面的主色传进来，
+     * 玻璃和强调元素就跟着封面走。传 null 表示用主题默认色。
+     *
+     * 放在主题层而不是每个组件各自判断：否则「取色」这件事要在
+     * 十几个地方各写一遍，还容易一半取色一半不取，看着很割裂。
+     */
+    accentOverride: Color? = null,
     content: @Composable () -> Unit
 ) {
+    val base = if (dark) DarkColors else LightColors
+    val colors = if (accentOverride == null) base else base.copy(accent = accentOverride)
     CompositionLocalProvider(
-        LocalColors provides if (dark) DarkColors else LightColors,
+        LocalColors provides colors,
         LocalGlass provides glass,
         LocalType provides LType,
         content = content

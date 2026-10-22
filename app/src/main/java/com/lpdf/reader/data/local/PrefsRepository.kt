@@ -39,6 +39,13 @@ data class AppSettings(
     // 阅读
     val readingMode: ReadingMode = ReadingMode.CONTINUOUS,
     val zoomLimit: Int = 5,
+    /**
+     * 自动旋转（**当前未实现**，设置页也没有入口）。
+     *
+     * v1.6.1 核对时确认它不是「假开关」—— 界面上根本没有这一项，
+     * 只是数据模型里留了字段。保留是为了不破坏已写盘的数据结构，
+     * 等真做横屏阅读时直接接这条线，不必再做一次迁移。
+     */
     val autoRotate: Boolean = true,
     val keepScreenOn: Boolean = false,
     val rememberPosition: Boolean = true,
@@ -62,6 +69,12 @@ data class AppSettings(
     val wifiOnly: Boolean = true,
     val allowLinkPreview: Boolean = true,
     // 通用
+    /**
+     * 界面语言（**当前未实现**，设置页没有入口）。
+     *
+     * 现在只有中文一套文案，硬接这个字段只会给出「切了没变」的错觉。
+     * 保留字段的理由同 [autoRotate]：不做破坏性迁移。
+     */
     val language: String = "system",
     // 列表
     val sortOrder: SortOrder = SortOrder.MODIFIED_DESC,

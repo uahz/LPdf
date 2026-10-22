@@ -18,7 +18,9 @@ import com.lpdf.reader.data.pdf.PdfiumEngine
 import com.lpdf.reader.data.pdf.Tile
 import com.lpdf.reader.data.pdf.TilePlan
 import com.lpdf.reader.ui.glass.GlassToast
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -207,6 +209,27 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
     /** 调用方指定的起始页；-1 表示未指定（按上次进度） */
     private var pendingStartPage: Int = -1
 
+    // ---- v1.6.1：设置项快照 ----
+    // 这些值以前只存在设置页里没人读。默认值取「与旧行为一致」的那一侧，
+    // 避免用户没动过设置却发现行为变了。
+
+    /** 关掉后不再读写阅读进度（打开永远从第 1 页开始） */
+    private var rememberPosition: Boolean = true
+
+    /** 每页最多保留多少条可撤销的标注 */
+    private var undoLimit: Int = 50
+
+    /** 当前笔宽（pt）。由 ReaderPanels 的粗细控件与设置里的默认值共同决定 */
+    var inkWidth: Float = 2f
+        private set
+
+    /** 用户在本次阅读里手动选过颜色 / 拖过粗细 —— 之后不再被设置值覆盖 */
+    private var highlightTouched: Boolean = false
+    private var inkWidthTouched: Boolean = false
+
+    /** 是否在停笔 600ms 后自动落盘 */
+    private var autoSaveAnnotations: Boolean = true
+
     /**
      * 当前文档的常驻渲染会话。
      *
@@ -286,9 +309,13 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
                     sessionRef?.let { runCatching { it.close() } }
                     sessionRef = session
                     val count = session.pageCount
-                    val saved = withContext(AppDispatchers.io) {
-                        container.prefs.progressMapSnapshot(docKey)
-                    }
+                    // 关掉「记忆阅读位置」时连读都不读：否则关掉开关后
+                    // 打开还是跳到上次那页，等于开关没作用
+                    val saved = if (rememberPosition) {
+                        withContext(AppDispatchers.io) {
+                            container.prefs.progressMapSnapshot(docKey)
+                        }
+                    } else 0
                     // 显式指定的页优先于上次进度
                     val target = if (pendingStartPage >= 0) pendingStartPage else saved
                     // 用完必须复位：否则在同一个 ViewModel 里换文档时
@@ -417,6 +444,9 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
             currentPage = page,
             currentPageBookmarked = bm.any { it.page == page }
         )
+        // 关掉「记忆阅读位置」后：既不写也不读，但**不清掉**已有的记录。
+        // 用户可能只是暂时不想定位，回头打开还应该找得到。
+        if (!rememberPosition) return
         progressJob?.cancel()
         progressJob = viewModelScope.launch {
             delay(800)
@@ -434,12 +464,76 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
     fun setZoomLimit(limit: Float) {
         zoomLimit = limit.coerceIn(1f, 8f)
     }
+
+    /**
+     * 阅读相关的设置快照（v1.6.1）。
+     *
+     * 这些开关以前只存在设置页里、没人读，表现为「改了没反应」。
+     * 现在统一由阅读页在设置变化时推进来，ViewModel 只读快照，
+     * 不去订阅 DataStore —— 阅读中的每次判断不应该依赖一次磁盘 IO。
+     *
+     * @param undoLimit 单页最多保留的标注条数。调小时会立刻裁剪（见下方说明），
+     *   这一点必须让调用方知道——它会真的丢标注。
+     */
+    fun applySettings(
+        rememberPosition: Boolean,
+        defaultHighlightColor: Long,
+        undoLimit: Int,
+        defaultInkWidth: Float,
+        autoSaveAnnotations: Boolean
+    ) {
+        val prevUndoLimit = this.undoLimit
+        this.rememberPosition = rememberPosition
+        this.undoLimit = undoLimit.coerceIn(1, 500)
+        this.autoSaveAnnotations = autoSaveAnnotations
+        // 默认高亮色只在本次阅读还没手动选过颜色时应用，否则会盖掉用户刚选的颜色
+        if (!highlightTouched) {
+            _state.value = _state.value.copy(highlightColor = defaultHighlightColor)
+        }
+        // 笔宽同理：用户手动拖过粗细后，改设置不该把他正在用的笔宽改掉
+        if (!inkWidthTouched) {
+            inkWidth = defaultInkWidth.coerceIn(0.5f, 24f)
+        }
+        // 把上限调小是**立即生效**的，不能只等下一次 addAnnotation 才裁剪：
+        // 否则用户把 100 改成 20 之后，这一页的 80 条旧标注还在，
+        // 撤销键却只能撤到第 20 条，中间的既撤不掉也删不掉。
+        // 这里只在「上限变小」时裁剪，且不改变已保存内容之外的东西。
+        if (this.undoLimit < prevUndoLimit) {
+            annotations?.let { d -> trimToLimit(d) }
+        }
+    }
+
+    /** 按 undoLimit 裁掉每页最老的标注（只保底最新 N 条） */
+    private fun trimToLimit(doc: AnnotationDoc) {
+        var changed = false
+        doc.pages.values.forEach { list ->
+            val overflow = list.size - undoLimit
+            if (overflow > 0) {
+                repeat(overflow) { if (list.isNotEmpty()) list.removeAt(0) }
+                changed = true
+            }
+        }
+        if (changed) {
+            _state.value = _state.value.copy(annotationCount = doc.count(), dirty = true)
+            scheduleSave()
+        }
+    }
     fun toggleToc() = _state.value.let { _state.value = it.copy(tocOpen = !it.tocOpen) }
     fun closeToc() = _state.value.let { _state.value = it.copy(tocOpen = false) }
     fun toggleToolIsland() = _state.value.let { _state.value = it.copy(toolIslandOpen = !it.toolIslandOpen) }
     fun closeToolIsland() = _state.value.let { _state.value = it.copy(toolIslandOpen = false) }
     fun setTool(tool: EditorTool) = _state.value.let { _state.value = it.copy(tool = tool) }
-    fun setHighlightColor(color: Long) = _state.value.let { _state.value = it.copy(highlightColor = color) }
+    fun setHighlightColor(color: Long) {
+        // 记下「用户自己选过」：之后改设置里的默认高亮色就不该覆盖它
+        highlightTouched = true
+        _state.value = _state.value.copy(highlightColor = color)
+    }
+
+    /** 用户拖动粗细控件。会标记为已手动设定，后续设置变更不再覆盖 */
+    fun setInkWidth(width: Float) {
+        inkWidthTouched = true
+        inkWidth = width.coerceIn(0.5f, 24f)
+    }
 
     // ---------------------------------------------------------------- 标注
 
@@ -447,7 +541,12 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
     fun addAnnotation(page: Int, a: Annotation) {
         val doc = annotations ?: return
-        doc.pages.getOrPut(page) { mutableListOf() }.add(a)
+        val list = doc.pages.getOrPut(page) { mutableListOf() }
+        list.add(a)
+        // 「撤销步数」= 一页最多存多少条。超了就丢最早的，
+        // 这样连续画很久也不会让单页无限膨胀、撤销一按回到解放前
+        val overflow = list.size - undoLimit
+        if (overflow > 0) repeat(overflow) { if (list.isNotEmpty()) list.removeAt(0) }
         _state.value = _state.value.copy(annotationCount = doc.count(), dirty = true)
         scheduleSave()
     }
@@ -470,6 +569,10 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     private fun scheduleSave() {
+        // 关掉「自动保存标注」时只标记 dirty，不落盘：
+        // 退出阅读页会走 flush()，标注不会丢，只是不在绘制过程中反复写文件。
+        // 对机械硬盘 / 低端机这一点 IO 抖动体感很明显。
+        if (!autoSaveAnnotations) return
         saveJob?.cancel()
         saveJob = viewModelScope.launch {
             delay(600)
@@ -479,9 +582,51 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
+    /**
+     * 立即写盘（阻塞版）。
+     *
+     * 调用时机：`onCleared`。此时 viewModelScope 已经被取消，
+     * 挂协程来不及跑完 —— 只能同步写完。
+     *
+     * ## 为什么 NonCancellable 单独用不够
+     *
+     * 只在 `withContext(io + NonCancellable)` 里包一层是不够的：
+     * `onCleared()` 会 `cancel()` 整个 viewModelScope，外层 launch 直接不执行，
+     * 里面那段 NonCancellable 根本没机会跑起来（v1.6.1 自查发现）。
+     *
+     * 用户关掉「自动保存标注」时落盘完全靠这条路径 —— 也就是说那条路本来会丢标注。
+     * 标注文件只有几十 KB 量级，写一次是毫秒级，代价远小于丢数据。
+     *
+     * `Dispatchers.IO` 是独立线程池，主线程阻塞等待它不会死锁，
+     * 但会卡住一帧——所以 [flushAsync] 才是 UI 该用的那个。
+     */
     fun flush() {
+        if (!_state.value.dirty) return
         val doc = annotations ?: return
-        viewModelScope.launch(AppDispatchers.io) { container.annotations.save(doc) }
+        runCatching {
+            kotlinx.coroutines.runBlocking {
+                withContext(AppDispatchers.io + kotlinx.coroutines.NonCancellable) {
+                    container.annotations.save(doc)
+                }
+            }
+            _state.value = _state.value.copy(dirty = false)
+        }
+    }
+
+    /**
+     * 立即写盘（不阻塞 UI 版）。
+     *
+     * 调用时机：返回键、切到后台。这里用独立协程而不是 `viewModelScope` ——
+     * 退出阅读页时作用域可能正好被取消，挂在它上面的写入会静默丢失。
+     * 新建的协程不受 ViewModel 生命周期影响，会老老实实把这次写入做完。
+     */
+    fun flushAsync() {
+        if (!_state.value.dirty) return
+        val doc = annotations ?: return
+        CoroutineScope(AppDispatchers.io + SupervisorJob()).launch {
+            runCatching { container.annotations.save(doc) }
+            _state.value = _state.value.copy(dirty = false)
+        }
     }
 
     // ---------------------------------------------------------------- 标注扁平化导出
@@ -495,6 +640,29 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
      *
      * 原 PDF 不做任何修改；标注 JSON 也保留，导出属于「另存一份带标注的副本」。
      */
+    /**
+     * 当前打开的文件能否被直接写回（v1.6.1）。
+     *
+     * 「默认保存方式 = 覆盖原文件」只在真的可写时才有意义。
+     * 判定要同时满足两条：
+     * 1. 不是 `content://` 的 MediaStore 文档 —— 那类 Uri 只有读权限
+     * 2. 如果是 `file://` 或普通路径，文件本身要可写
+     *
+     * 做不到就回落「另存为」，而不是让用户点了没反应。
+     */
+    fun canOverwriteSource(): Boolean {
+        if (uri == Uri.EMPTY) return false
+        return when (uri.scheme) {
+            "file" -> {
+                val f = uri.path?.let { java.io.File(it) }
+                f != null && f.exists() && f.canWrite()
+            }
+            // content:// 只有拿到写授权才能覆盖。当前应用申请的是只读文档权限，
+            // 没有 WRITE 能力，所以一律回落另存为
+            else -> false
+        }
+    }
+
     fun exportFlattened(targetUri: Uri) {
         val doc = annotations ?: run {
             toast("文档尚未就绪")

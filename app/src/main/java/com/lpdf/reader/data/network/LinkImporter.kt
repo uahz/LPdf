@@ -1,6 +1,8 @@
 package com.lpdf.reader.data.network
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import com.lpdf.reader.core.model.PdfError
 import com.lpdf.reader.core.model.PdfResult
@@ -42,6 +44,16 @@ class LinkImporter(
             ?.ifBlank { "link_${System.currentTimeMillis()}.pdf" }
             ?: "link_${System.currentTimeMillis()}.pdf"
         val safeName = if (name.lowercase().endsWith(".pdf")) name else "$name.pdf"
+
+        // 「仅 Wi-Fi 下载」（v1.6.1 接线）：开关在设置页里存在了很久，
+        // 但从来没人读 —— 用户以为用流量时不会下载，实际上照样跑完全程。
+        // 判定放在真正开始下载之前：先查一次当前网络类型，
+        // 不是 Wi-Fi 就直接拒绝并说明原因，而不是下到一半才停。
+        if (settings.wifiOnly && !isOnWifi()) {
+            return@withContext PdfResult.Failure(
+                PdfError.Network("已开启「仅 Wi-Fi 下载」，当前不是 Wi-Fi 网络")
+            )
+        }
 
         val dir = File(context.filesDir, "imported").apply { mkdirs() }
         val outFile = File(dir, "${System.currentTimeMillis()}_$safeName")
@@ -85,6 +97,22 @@ class LinkImporter(
             outFile.delete()
             PdfResult.Failure(PdfError.Network(e.message ?: "网络不可用，已切回本地模式"))
         }
+    }
+
+    /**
+     * 当前是否处于 Wi-Fi / 以太网。
+     *
+     * 用 `ConnectivityManager` 的网络能力判断，而不是 `NetworkInfo.getType()` ——
+     * 后者在 Android 10+ 已废弃，且在「Wi-Fi 连着但没网、实际走流量」的场景下
+     * 会给出错误答案（给出 Wi-Fi，用户被扣了流量）。
+     * 这里查的是**承载当前默认网络的传输类型**，与实际出网的链路一致。
+     */
+    private fun isOnWifi(): Boolean {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return false
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
     }
 
     /** 清理超过 7 天的导入缓存 */

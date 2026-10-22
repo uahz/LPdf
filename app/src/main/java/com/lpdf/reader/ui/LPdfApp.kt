@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.lifecycle.Lifecycle
@@ -101,13 +102,18 @@ fun LPdfApp(
     // 任一组件在绘制期降级，全局同步降级，避免「一半折射一半不折射」的割裂感。
     val glassCapability = rememberGlassCapability()
 
+    // 「高亮色取自文档」：打开时用最近打开的那份文档的封面主色做强调色。
+    // 关掉（或不取色成功）时传 null，走主题默认蓝。
+    val contentAccent = rememberContentAccent(container, settings.accentFromContent)
+
     LPdfTheme(
         dark = dark,
         // 把探测结果并进 GlassSpec：设备不支持 AGSL 时整体强度归零，
         // 玻璃退化为纯模糊 + 底色，而不是靠每个组件自己再判断一次
         glass = settings.toGlassSpec().let { spec ->
             if (glassCapability.hasRefraction) spec else spec.copy(intensity = 0f)
-        }
+        },
+        accentOverride = contentAccent
     ) {
         CompositionLocalProvider(LocalGlassCapability provides glassCapability) {
             NavHost(navController = navController, startDestination = Routes.ROOT) {
@@ -290,4 +296,42 @@ private fun HomeTab(
         onImport = onGoDocs,
         onSeeAll = onGoDocs
     )
+}
+
+/**
+ * 「高亮色取自文档」的实现（v1.6.1）。
+ *
+ * 取**最近修改过的那份文档**封面的主色。选它而不是让用户挑一份，
+ * 是因为这个开关的意图是「让界面跟着我最近在看的东西变」，不需要额外交互。
+ *
+ * 只在缩略图已经存在时取色 —— 不为了一个装饰性的颜色去渲染一份 PDF，
+ * 那会让首页首帧多等几百毫秒，代价远大于收益。没有缩略图就退回默认色。
+ */
+@Composable
+private fun rememberContentAccent(
+    container: AppContainer,
+    enabled: Boolean
+): Color? {
+    var accent by remember { mutableStateOf<Color?>(null) }
+
+    LaunchedEffect(enabled) {
+        if (!enabled) {
+            accent = null
+            return@LaunchedEffect
+        }
+        accent = withContext(Dispatchers.IO) {
+            runCatching {
+                val hidden = container.prefs.hiddenIds.first()
+                val doc = container.mediaStore.scanAll()
+                    .filterNot { hidden.contains(it.id) }
+                    .maxByOrNull { it.lastModified }
+                    ?: return@runCatching null
+                val key = container.thumbnails.cacheKey(doc.id, doc.lastModified)
+                // 没缩略图就不取色：宁可回默认色，也不为装饰去渲染一整页 PDF
+                if (!container.thumbnails.has(key)) return@runCatching null
+                container.thumbnails.sampleColor(key)?.let { Color(it) }
+            }.getOrNull()
+        }
+    }
+    return accent
 }

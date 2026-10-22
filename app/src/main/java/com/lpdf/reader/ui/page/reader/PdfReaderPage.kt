@@ -76,15 +76,18 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lpdf.reader.AppContainer
 import com.lpdf.reader.core.util.Formatters
+import android.net.Uri
 import com.lpdf.reader.data.local.Annotation
 import com.lpdf.reader.data.local.AnnotRect
 import com.lpdf.reader.data.local.AppSettings
 import com.lpdf.reader.data.local.ReadingMode
+import com.lpdf.reader.data.local.SaveMode
 import com.lpdf.reader.data.pdf.PageRender
 import com.lpdf.reader.ui.glass.GlassIconButton
 import com.lpdf.reader.ui.glass.GlassPillButton
 import com.lpdf.reader.ui.glass.GlassProgressRing
 import com.lpdf.reader.ui.glass.GlassSnackbarHost
+import com.lpdf.reader.ui.glass.GlassSlider
 import com.lpdf.reader.ui.glass.GlassStateCard
 import com.lpdf.reader.ui.glass.GlassTab
 import com.lpdf.reader.ui.glass.GlassTabBar
@@ -124,11 +127,31 @@ fun PdfReaderPage(
     lastModified: Long = 0L,
     onClose: () -> Unit
 ) {
-    val vm = rememberReaderViewModel(container)
+    val vm = rememberReaderViewModel(container, uri)
     val state by vm.state.collectAsState()
     val colors = LocalColors.current
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+
+    // 设置项要先于 bind 落地：open() 里的「是否恢复上次进度」直接读
+    // rememberPosition，晚一拍就会用默认值 true 走一遍错误的分支。
+    // key 用具体字段而不是整个 settings，避免无关设置变更（比如玻璃模糊）
+    // 把 highlightTouched 之类的会话状态牵连进重算。
+    LaunchedEffect(
+        settings.rememberPosition,
+        settings.defaultHighlightColor,
+        settings.undoLimit,
+        settings.defaultInkWidth,
+        settings.autoSaveAnnotations
+    ) {
+        vm.applySettings(
+            rememberPosition = settings.rememberPosition,
+            defaultHighlightColor = settings.defaultHighlightColor,
+            undoLimit = settings.undoLimit,
+            defaultInkWidth = settings.defaultInkWidth,
+            autoSaveAnnotations = settings.autoSaveAnnotations
+        )
+    }
 
     // 绑定文档（uri + mtime 由导航参数给出，缺失时用 0 仍可读）
     LaunchedEffect(uri, lastModified, startPage) {
@@ -218,7 +241,7 @@ fun PdfReaderPage(
                         message = state.error?.message ?: "文件可能已损坏或已被移动。",
                         primary = "返回列表",
                         onPrimary = {
-                            vm.flush()
+                            vm.flushAsync()
                             onClose()
                         }
                     )
@@ -280,6 +303,7 @@ fun PdfReaderPage(
                                 widthPx = contentWidthPx,
                                 settings = settings,
                                 highlightColor = state.highlightColor,
+                                inkWidth = vm.inkWidth,
                                 tool = if (state.chromeVisible) state.tool else EditorTool.NONE
                             )
                         }
@@ -308,7 +332,7 @@ fun PdfReaderPage(
                     } else "",
                     hasToc = state.toc.isNotEmpty(),
                     onBack = {
-                        vm.flush()
+                        vm.flushAsync()
                         onClose()
                     },
                     onToc = vm::toggleToc
@@ -339,8 +363,10 @@ fun PdfReaderPage(
                 ToolIsland(
                     tool = state.tool,
                     color = state.highlightColor,
+                    inkWidth = vm.inkWidth,
                     annotationCount = state.annotationCount,
                     onColor = vm::setHighlightColor,
+                    onWidth = vm::setInkWidth,
                     onUndo = {
                         if (!vm.undo(state.currentPage)) vm.toast("没有可撤销的标注")
                     },
@@ -348,7 +374,22 @@ fun PdfReaderPage(
                         vm.clearPage(state.currentPage)
                         vm.toast("已清空本页标注")
                     },
-                    onExport = { exportLauncher.launch(suggestExportName(state.displayName)) },
+                    onExport = {
+                        // 「默认保存方式 = 覆盖原文件」时跳过选择器，直接写回。
+                        // 但能不能写回取决于这份 uri 是否可写：
+                        // MediaStore 文档、SAF 只读授权都写不进去，
+                        // 这时必须回落到「另存为」，否则用户点了没反应还以为坏了。
+                        val canOverwrite = settings.saveMode == SaveMode.OVERWRITE &&
+                            vm.canOverwriteSource()
+                        if (canOverwrite) {
+                            vm.exportFlattened(Uri.parse(uri))
+                        } else {
+                            if (settings.saveMode == SaveMode.OVERWRITE) {
+                                vm.toast("这份文件不能直接覆盖，改用另存为")
+                            }
+                            exportLauncher.launch(suggestExportName(state.displayName))
+                        }
+                    },
                     onSignature = vm::toggleSignaturePanel,
                     onClose = { vm.setTool(EditorTool.NONE) }
                 )
@@ -562,6 +603,8 @@ private fun PageItem(
     widthPx: Int,
     settings: AppSettings,
     highlightColor: Long,
+    /** 墨迹粗细（pt）。来自设置里的默认值，用户可在工具面板里改 */
+    inkWidth: Float,
     tool: EditorTool
 ) {
     val bounds = with(LocalDensity.current) {
@@ -647,6 +690,7 @@ private fun PageItem(
                 annotations = vm.annotationsOf(page),
                 tool = tool,
                 highlightColor = highlightColor,
+                inkWidth = inkWidth,
                 searchRects = vm.hitRectsOnPage(page),
                 activeSearchRects = vm.activeHitRectsOnPage(page),
                 onAdd = { vm.addAnnotation(page, it) }
@@ -789,6 +833,7 @@ private fun AnnotationLayer(
     annotations: List<Annotation>,
     tool: EditorTool,
     highlightColor: Long,
+    inkWidth: Float,
     searchRects: List<com.lpdf.reader.data.pdf.PdfiumEngine.AnnotRectLike> = emptyList(),
     activeSearchRects: List<com.lpdf.reader.data.pdf.PdfiumEngine.AnnotRectLike> = emptyList(),
     onAdd: (Annotation) -> Unit
@@ -826,7 +871,8 @@ private fun AnnotationLayer(
                                     Annotation.Ink(
                                         id = ReaderViewModel.newId(),
                                         points = ink.map { p -> (p.x / w) to (p.y / h) },
-                                        width = 2f / w,
+                                        // 原来是硬编码 2f —— 「墨迹粗细」这个设置形同虚设
+                                        width = inkWidth / w,
                                         color = highlightColor
                                     )
                                 )
@@ -1212,8 +1258,10 @@ private fun DockBtn(
 private fun ToolIsland(
     tool: EditorTool,
     color: Long,
+    inkWidth: Float,
     annotationCount: Int,
     onColor: (Long) -> Unit,
+    onWidth: (Float) -> Unit,
     onUndo: () -> Unit,
     onClear: () -> Unit,
     onExport: () -> Unit,
@@ -1268,6 +1316,23 @@ private fun ToolIsland(
                 }
             }
             Spacer(Modifier.width(4.dp))
+            // 只有用笔的时候才显示粗细：高亮/形状改了也没意义，白白占位置
+            if (tool == EditorTool.INK) {
+                Row(
+                    Modifier
+                        .width(96.dp)
+                        .padding(horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    GlassSlider(
+                        value = inkWidth,
+                        onValueChange = onWidth,
+                        valueRange = 0.5f..12f,
+                        contentDescription = "墨迹粗细"
+                    )
+                }
+                Spacer(Modifier.width(4.dp))
+            }
             DockBtn(LIcon.Signature, "签名", false, false, 36.dp, onSignature)
             DockBtn(LIcon.Undo, "撤销", false, false, 36.dp, onUndo)
             DockBtn(LIcon.Trash, "清空", false, false, 36.dp, onClear)
