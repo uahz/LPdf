@@ -49,6 +49,8 @@ object Routes {
     const val ROOT = "root"
     const val READER = "reader"
     const val TOOLS = "tools"
+    /** 完整设置页（v1.7.2）。从「我的」主屏进入，全屏无底栏 */
+    const val SETTINGS = "settings"
 
     /**
      * @param modified 文件修改时间。**必须传** —— 标注/书签/阅读进度的存储键是
@@ -126,7 +128,8 @@ fun LPdfApp(
                         },
                         onOpenTools = { path, name, pages ->
                             navController.navigate(Routes.tools(path, name, pages))
-                        }
+                        },
+                        onOpenSettings = { navController.navigate(Routes.SETTINGS) }
                     )
                 }
                 composable(
@@ -166,6 +169,13 @@ fun LPdfApp(
                         onBack = { navController.popBackStack() }
                     )
                 }
+                composable(Routes.SETTINGS) {
+                    SettingsPage(
+                        container = container,
+                        settings = settings,
+                        onBack = { navController.popBackStack() }
+                    )
+                }
             }
         }
     }
@@ -183,7 +193,8 @@ private fun RootTabs(
     container: AppContainer,
     settings: AppSettings,
     onOpenReader: (uri: String, name: String, modified: Long, page: Int) -> Unit,
-    onOpenTools: (path: String, name: String, pages: Int) -> Unit
+    onOpenTools: (path: String, name: String, pages: Int) -> Unit,
+    onOpenSettings: () -> Unit
 ) {
     var selected by remember { mutableStateOf(RootTab.HOME) }
 
@@ -229,11 +240,13 @@ private fun RootTabs(
                     }
                 }
             )
-            // 设置作为「我的」Tab 内嵌：onBack = null 时它不画返回按钮
+            // v1.7.2：「我的」是一屏入口，完整设置走独立路由。
+            // 直接内嵌设置页会让密集的说明文字压在玻璃底栏上（用户截图）。
             RootTab.PROFILE -> SettingsPage(
                 container = container,
                 settings = settings,
-                onBack = null
+                onBack = null,
+                onOpenSettings = onOpenSettings
             )
         }
     }

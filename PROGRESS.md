@@ -1,7 +1,7 @@
 # LPdf 开发进度
 
-> 更新时间：2026-10-22 16:15
-> 当前版本：**v1.7.1**（versionCode 171）
+> 更新时间：2026-10-22 19:20
+> 当前版本：**v1.7.2**（versionCode 172）
 > 仓库：https://github.com/uahz/LPdf
 
 ---
@@ -10,12 +10,12 @@
 
 | 指标 | 数值 |
 | --- | --- |
-| 当前版本 | v1.7.1 |
-| versionCode | 171 |
-| 最近发布 | [v1.7.1](https://github.com/uahz/LPdf/releases/tag/v1.7.1)（2026-10-22） |
+| 当前版本 | v1.7.2 |
+| versionCode | 172 |
+| 最近发布 | [v1.7.2](https://github.com/uahz/LPdf/releases/tag/v1.7.2)（2026-10-22） |
 | 单测数量 | **206 项，全绿** |
 | Lint | **0 error / 11 warning**（已进 CI，`abortOnError = true`） |
-| APK 体积 | **22.3 MB**（v1.7.0 为 29.6 MB，减 23.5%） |
+| APK 体积 | **22.35 MB**（v1.7.0 为 29.6 MB，减 23.9%） |
 | CI 签名 | ✅ 已配置 4 个 secrets，CI 产物为签名包 |
 | 源码规模 | 61 个 Kotlin 文件 / 15777 行 |
 | 测试文件 | 31 个 |
@@ -34,13 +34,138 @@
 | v1.6.0 | 五 Tab 导航改版 + 标注丢失根因修复 | ✅ 已发布 |
 | v1.6.1 | 8 个假开关修复 + 6 处自查缺陷 | ✅ 已发布 |
 | v1.7.0 | 阅读体验增强（文本选择 / 缩放锚点 / 夜间反色 / 缩略图预热） | ✅ 已发布 |
-| **v1.7.1** | **体积与质量收尾（删 PDFBox / Lint 进 CI）** | ✅ **已发布** |
+| v1.7.1 | 体积与质量收尾（删 PDFBox / Lint 进 CI） | ✅ 已发布 |
+| **v1.7.2** | **底栏重做（对齐 iOS 26）+ 页面宽度自适应 + 遮挡修复** | ✅ **已发布** |
 | v1.8.0 | 元数据编辑 | ⬜ 待开始 |
 | v2.0.0 | 多语言 + 性能与大文件 | ⬜ 待开始 |
 
 ---
 
-## 二、v1.7.1 已完成的工作（本轮）
+## 二、v1.7.2 已完成的工作（本轮）
+
+三张真机截图驱动的修正版本。用户原话：
+
+> 「打开这么小我怎么看？请你设置成检测用户手机并自动适配对应大小好吗」
+> 「这个底栏哪里像IOS26的底栏了 我要的是IOS一模一样的」
+
+### 1. 底栏重做为 iOS 26 形态 ✅
+
+**结论先行：整条 `GlassTabBar.kt` 重写，从「猜的玻璃药丸」改为对照 Kyant0 官方 `LiquidBottomTabs` 的结构化实现。**
+
+#### 1.1 旧版错在哪
+
+| 项 | 旧版（v1.4.0 ~ v1.7.1） | iOS 26 实际 | 后果 |
+| --- | --- | --- | --- |
+| 选中指示器 | 常驻一片玻璃药丸，跟随选中项滑动 | 只在**按压时**从图标下方压出一滴玻璃，松手消散 | 看起来像 Android 旧式 TabLayout |
+| 文字标签 | 五项全挂中文标签 | 纯图标，**只有当前项**显示文字 | 窄屏上文字压到相邻项 |
+| 横向拖拽 | 支持拖拽切换 | 不支持（tab bar 不是滑块） | 误以为能连续切换，与系统边缘手势打架 |
+| 高度结构 | 单层 62dp | 64dp 外筐 + 4dp 内边距 + 56dp 内层 | 缺一层，玻璃显得平板 |
+
+#### 1.2 新版结构
+
+```
+┌─────────────────────────────────────────┐  64dp 外筐
+│ ╭─────────────────────────────────────╮ │  4dp 内边距
+│ │  ⌂      ▦      ◉      ♪             │ │  56dp 内层
+│ │ 首页   文档   书签   发现            │ │  仅选中项有文字
+│ ╰─────────────────────────────────────╯ │
+└─────────────────────────────────────────┘
+     ↑ 按压时在图标下方压出一滴玻璃（lens 16dp→收缩，色散开启）
+```
+
+关键实现点：
+
+- **外筐**：`drawBackdrop` + `vibrancy()` + `blur(12dp)` + `lens(24dp, 24dp, depthEffect, chromaticAberration)`
+- **内层**：单独一圈 1dp 内描边（浅色 30% 白 / 深色 5% 白），对应 iOS「两片玻璃叠着」的层次
+- **玻璃滴**：`rememberGraphicsLayer()` 把底栏自身内容录一层，与外层页面 backdrop 用
+  `rememberCombinedBackdrop(pageBackdrop, tabBarBackdrop)` 合成。**只用一个 backdrop 时，
+  玻璃滴里什么都看不见** —— 它需要折射的是图标和文字，不是底下的页面。
+- **按压曲线**：`Animatable` 驱动 `progress` 0→1，`lens` 半径从 0.35 倍长到 1 倍，
+  色散与高光同步增强，`tween(140ms)` 按下 / `tween(280ms)` 松开
+- **无障碍**：纯图标形态下文字不再是可见信息，改为挂 `contentDescription`，
+  否则读屏只能念「按钮」
+
+### 2. 玻璃底栏不再「透明到看不清」✅
+
+截图里设置页的「默认保存方式 / 覆盖…」直接压在底栏图标上。三层原因，逐一修：
+
+| 层次 | 旧值 | 新值 | 理由 |
+| --- | --- | --- | --- |
+| 底栏材料底色 | `glassBase` 12% 白 + `glassFrost` 20% 白 | `onDrawSurface` 25% 白 / 55% 黑 | 深色底上 32% 白几乎等于透明；55% 黑才能压住白底 PDF |
+| 宿主底部渐变 | `pageBg` 55% 不透明，从 78% 开始 | 三段式 0% → 72% → 100%，从 62% 开始 | 55% 的上限不够，文字仍会透上来 |
+| 内容避让 | 各页 `bottom = 120dp` | 保持一致（116~150dp） | 底栏 64dp + 12dp 悬浮间距 |
+
+### 3. PDF 页面自适应屏幕宽度 ✅
+
+**结论先行：页宽从「固定扣 32dp」改为按实测可用宽度分档扣 6dp / 10dp，渲染宽度与显示宽度严格一致。**
+
+旧链路有两处固定值：
+
+```kotlin
+val areaWidthPx = (widthPx - bounds.padH * 2).toInt()   // bounds.padH = 16.dp
+Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+```
+
+在 400dp 宽的手机上，页面只剩 368dp；小屏（360dp）上更糟，相对占比达 8.9%。
+叠加 `PageItem` 外层再扣一次，实际可达 32dp。
+
+新版：
+
+```kotlin
+// 可用宽 < 360dp（小屏 / 分屏）→ 6dp，其余 → 10dp
+val hPad = if (contentWidthDp < 360.dp) 6.dp else 10.dp
+val pageWidthPx = (contentWidthPx - hPadPx * 2).toInt()
+// 传下去的是「扣完留白的宽度」，PageItem 内部不再二次相减
+PageItem(widthPx = pageWidthPx, horizontalPadding = hPad, ...)
+```
+
+`contentWidthDp` 由 `contentWidthPx ÷ density` 得到，**不用** `Configuration.screenWidthDp`
+—— 后者在分屏 / 折叠屏展开态下与实测宽度对不上（v1.5.1 踩过这个坑）。
+
+### 4. 「我的」Tab 改为入口页 ✅
+
+v1.6.0 把完整设置页塞进了 Tab 宿主，信息架构是错的：iOS 的「我的」是一屏**入口**，
+点进去才是设置。现在拆成：
+
+```
+Tab 宿主 ─「我的」→ ProfileHome（当前翻页方式 / 主题 / 保存方式 + 「设置」入口）
+                          ↓
+                    Routes.SETTINGS → SettingsPage（完整设置，全屏无底栏）
+```
+
+`SettingsPage` 变成双模式：`onBack != null` 是独立页，`onBack == null && onOpenSettings != null`
+是内嵌主屏；两者都没有时退化为旧行为，保证既有调用方不改代码也不会白屏。
+
+### 5. 测试同步 ✅
+
+`DockIntegrationTest` 的两条断言原本靠「五项都有文字节点」定位底栏。
+底栏改为纯图标后，未选中项没有文字节点，测试必然失败 —— 这是**正确的不通过**，
+说明测试真的在测渲染结果。改为按 `contentDescription` 定位：
+
+```kotlin
+private fun tabCenterY(label: String): Float? {
+    val byDesc = compose.onAllNodes(hasContentDescription(label)).fetchSemanticsNodes()
+    val node = byDesc.maxByOrNull { it.positionInRoot.y }
+        ?: compose.onAllNodesWithText(label).fetchSemanticsNodes().maxByOrNull { it.positionInRoot.y }
+        ?: return null
+    ...
+}
+```
+
+### 本轮验证结果
+
+| 项 | 结果 |
+| --- | --- |
+| `compileDebugKotlin` | ✅ 成功，无新增警告 |
+| `testDebugUnitTest` | ✅ **206 项，0 失败** |
+| `lintDebug` | ✅ **0 error / 11 warning**（与 v1.7.1 持平） |
+| `assembleRelease` | ✅ 22,346,473 字节 |
+| 包信息 | `versionCode=172` / `versionName=1.7.2` |
+| 签名 | SHA-256 `1590d022…`，与 1.1.0 以来一致，可覆盖升级 |
+
+---
+
+## 三、v1.7.1 已完成的工作
 
 收尾性质，只做"减重 + 把静态检查真正跑起来"两件事，但过程中挖出的问题比预期多。
 
@@ -220,7 +345,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 三、v1.7.0 已完成的工作（上一轮）
+## 四、v1.7.0 已完成的工作
 
 | 功能 | 实现要点 |
 | --- | --- |
@@ -231,7 +356,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 四、网盘同步状态
+## 五、网盘同步状态
 
 **v1.5.2 起的阻塞已解除**（原为 COS 403 `SignatureDoesNotMatch`，平台临时凭证失效，服务端侧问题）。
 
@@ -243,9 +368,10 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 | v1.6.0 | ✅ | ✅ 2026-10-22 补传 |
 | v1.6.1 | ✅ | ✅ 2026-10-22 补传 |
 | v1.7.0 | ✅ | ✅ 2026-10-22 补传 |
-| v1.7.1 | ✅ 签名包 `app-release.apk` | ✅ 本次上传 |
+| v1.7.1 | ✅ 签名包 `app-release.apk` | ✅ |
+| **v1.7.2** | ✅ 签名包 `app-release.apk` | ✅ 本次上传 |
 
-> 网盘 `LPdf` 目录现含 1.2.0 ~ 1.7.1 共 13 个 APK。
+> 网盘 `LPdf` 目录现含 1.2.0 ~ 1.7.2 共 14 个 APK。
 
 > 发版时发现 GitHub 仓库**从未配置过签名 secrets**，CI 一直产出的是未签名的
 > `app-release-unsigned.apk` —— 用户下载后无法安装。本次已补配
@@ -256,7 +382,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 五、后续版本计划
+## 六、后续版本计划
 
 ### v1.8.0 · 元数据编辑
 
@@ -284,7 +410,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 六、遗留待办（非阻塞）
+## 七、遗留待办（非阻塞）
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
@@ -294,7 +420,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 七、已知限制
+## 八、已知限制
 
 1. **渲染**：极端长页（如 50:1 的 CAD 图）会整体等比降级，保宽高比但牺牲清晰度 —— 这是 4 块上限的必然结果
 2. **玻璃**：无 AGSL 支持的设备退化为纯模糊 + 底色，强度全局归零

@@ -71,6 +71,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -222,6 +223,10 @@ fun PdfReaderPage(
             // 实测约束拿到的是**物理像素**，之后不再有任何 dp/density 换算，
             // 从源头消灭「宽度被放大」这条路径（sanitizePageSize 只作兜底）。
             var contentWidthPx by remember { mutableIntStateOf(0) }
+            // 同一份宽度的 dp 值，供分档留白判断用。
+            // 直接由 px ÷ density 得到，不使用 Configuration.screenWidthDp ——
+            // 后者在分屏 / 折叠屏下与实测宽度不一致（见上方注释）。
+            val contentWidthDp = with(LocalDensity.current) { contentWidthPx.toDp() }
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -284,6 +289,21 @@ fun PdfReaderPage(
                         )
                     }
                 } else {
+                    // v1.7.2：页面宽度改为「实测可用宽度」自适应。
+                    //
+                    // 旧版固定 padding(horizontal = 16.dp)，在 400dp 宽的手机上
+                    // 页面只剩 368dp —— 看起来就是「只占屏幕中间一小条」。
+                    // 真机截图里页面左右各空出一大块，正是这个固定值造成的
+                    // （小屏上尤其明显，因为 16dp 对窄屏的相对占比更高）。
+                    //
+                    // 现在按可用宽度分档：
+                    //   可用宽 < 360dp（小屏 / 分屏）→ 6dp，尽量吃满
+                    //   其余                          → 10dp，留出视觉呼吸
+                    // 换算成 px 后传给渲染层，渲染宽度与显示宽度严格一致，
+                    // 不会出现「按 1080 渲完塞进 920 的框里」被二次缩小的糊边。
+                    val hPad = if (contentWidthDp < 360.dp) 6.dp else 10.dp
+                    val hPadPx = with(LocalDensity.current) { hPad.toPx() }
+                    val pageWidthPx = (contentWidthPx - hPadPx * 2).toInt().coerceAtLeast(240)
                     LazyColumn(
                         state = listState,
                         contentPadding = PaddingValues(
@@ -304,7 +324,8 @@ fun PdfReaderPage(
                             PageItem(
                                 vm = vm,
                                 page = page,
-                                widthPx = contentWidthPx,
+                                widthPx = pageWidthPx,
+                                horizontalPadding = hPad,
                                 settings = settings,
                                 highlightColor = state.highlightColor,
                                 inkWidth = vm.inkWidth,
@@ -606,20 +627,17 @@ private fun suggestExportName(displayName: String): String {
 private fun PageItem(
     vm: ReaderViewModel,
     page: Int,
+    /** 已扣掉左右留白的可用宽度（px）。渲染宽度与显示宽度严格一致 */
     widthPx: Int,
+    /** 左右留白（dp），与调用方扣掉的值一致 */
+    horizontalPadding: Dp,
     settings: AppSettings,
     highlightColor: Long,
     /** 墨迹粗细（pt）。来自设置里的默认值，用户可在工具面板里改 */
     inkWidth: Float,
     tool: EditorTool
 ) {
-    val bounds = with(LocalDensity.current) {
-        PageBounds(
-            padH = 16.dp.toPx(),
-            screenW = widthPx.toFloat()
-        )
-    }
-    val areaWidthPx = (widthPx - bounds.padH * 2).toInt().coerceAtLeast(240)
+    val areaWidthPx = widthPx.coerceAtLeast(240)
     var render by remember(page) { mutableStateOf(vm.renderFor(page)) }
     // 渲染失败时记下原因，避免「一直转圈却不说是错」
     var failure by remember(page) { mutableStateOf<String?>(null) }
@@ -657,7 +675,7 @@ private fun PageItem(
     Box(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp)
+            .padding(horizontal = horizontalPadding)
             .clip(Shapes2.M),
     ) {
         val current = render
@@ -738,8 +756,6 @@ private fun PageItem(
  * 无限转圈是最糟的失败方式，用户既不知道发生了什么，也不知道该做什么。
  */
 private const val MAX_RENDER_RETRY = 8
-
-private data class PageBounds(val padH: Float, val screenW: Float)
 
 /**
  * 把缩放后的平移量收进可视范围（v1.7.0）。

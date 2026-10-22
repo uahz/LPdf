@@ -35,6 +35,26 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34], qualifiers = "w411dp-h891dp")
 class DockIntegrationTest {
 
+    /**
+     * 取底栏某一项的中心 y（像素）。
+     *
+     * v1.7.2 起底栏是 iOS 26 形态：**纯图标 + 只有选中项显示文字**。
+     * 所以不能再靠 `onAllNodesWithText` 找五项 —— 未选中的项没有文字节点。
+     * 改为用图标的 contentDescription 定位（[TabItem] 的 `LIconView` 会带出
+     * 无障碍描述），文本匹配只作为兜底。
+     */
+    private fun tabCenterY(label: String): Float? {
+        val byDesc = compose.onAllNodes(
+            androidx.compose.ui.test.hasContentDescription(label)
+        ).fetchSemanticsNodes()
+        val node = byDesc.maxByOrNull { it.positionInRoot.y }
+            ?: compose.onAllNodesWithText(label).fetchSemanticsNodes()
+                .maxByOrNull { it.positionInRoot.y }
+            ?: return null
+        val b = node.boundsInRoot
+        return (b.top + b.bottom) / 2f
+    }
+
     @get:Rule
     val compose = createComposeRule()
 
@@ -55,22 +75,15 @@ class DockIntegrationTest {
         val screenHeight = root.bottom.value * density
 
         // ---- 1. 五个 Tab 都渲染出来了 ----
-        // 首页的标题也叫「我的」以外的名字，所以这里逐个确认底栏项存在。
-        // 「文档」不会被首页正文重复（首页不列出「文档」字样）。
+        // v1.7.2：底栏是纯图标 + 仅选中项文字，所以按内容描述找，
+        // 不能再依赖「五项都有文字节点」。
         val labels = listOf("首页", "文档", "书签", "发现", "我的")
         labels.forEach { label ->
-            val nodes = compose.onAllNodesWithText(label).fetchSemanticsNodes()
-            assertTrue("底栏缺少「$label」", nodes.isNotEmpty())
+            assertTrue("底栏缺少「$label」", tabCenterY(label) != null)
         }
 
         // ---- 2. 底栏落在屏幕下半部分 ----
-        val dockNodes = compose.onAllNodesWithText("文档").fetchSemanticsNodes()
-        assertTrue("底栏「文档」项未找到", dockNodes.isNotEmpty())
-        // 「文档」在底栏只出现一次；若将来正文里也出现，取最靠下的那个更稳
-        val dock = dockNodes.maxByOrNull { it.positionInRoot.y }!!
-        val bounds = dock.boundsInRoot
-        val dockCenter = (bounds.top + bounds.bottom) / 2f
-
+        val dockCenter = tabCenterY("文档")!!
         assertTrue(
             "屏幕高 $screenHeight，底栏「文档」中心 y=$dockCenter。" +
                 "底栏落到了上半部分，说明它没有被贴底（overlay 坐标系问题）。",
@@ -88,12 +101,8 @@ class DockIntegrationTest {
         }
         compose.waitForIdle()
 
-        // 五个标签应当横排；只要有一个 y 明显偏移，就说明底栏内部布局坏了
-        val ys = listOf("首页", "文档", "书签", "发现", "我的").mapNotNull { label ->
-            compose.onAllNodesWithText(label).fetchSemanticsNodes()
-                .maxByOrNull { it.positionInRoot.y }
-                ?.boundsInRoot?.let { (it.top + it.bottom) / 2f }
-        }
+        // 五个图标应当横排；只要有一个 y 明显偏移，就说明底栏内部布局坏了
+        val ys = listOf("首页", "文档", "书签", "发现", "我的").mapNotNull { tabCenterY(it) }
         assertEquals(5, ys.size)
         val spread = (ys.max() - ys.min()).absoluteValue
         assertTrue("五个 Tab 的中心 y 相差 $spread px，说明没有对齐", spread < 4f)

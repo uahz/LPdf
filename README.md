@@ -1,4 +1,4 @@
-# LPdf 1.7.1 · Android PDF 阅读器
+# LPdf 1.7.2 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.7.1-release.apk
+adb install -r dist/LPdf-1.7.2-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -36,6 +36,66 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.7.2 变更
+
+三张真机截图驱动的修正版本。三个问题都出在「按猜的做」而不是「对着参照做」。
+
+### 一、底栏重做：这次真的对齐 iOS 26
+
+旧底栏是常驻玻璃药丸 + 五项全挂文字 + 支持横向拖拽。对照 iOS 26 与
+[Kyant0/LiquidBottomTabs](https://github.com/Kyant0/AndroidLiquidGlass) 源码后，
+三处都是结构性错误：
+
+| 项 | 旧版 | iOS 26 | 现在 |
+| --- | --- | --- | --- |
+| 选中指示器 | 常驻玻璃药丸 | 按压时压出一滴玻璃，松手消散 | ✅ 按压可见 |
+| 文字标签 | 五项全挂 | 纯图标，只有当前项有文字 | ✅ 仅选中项 |
+| 横向拖拽 | 支持 | 不支持 | ✅ 移除 |
+| 高度 | 单层 62dp | 64dp 外筐 + 56dp 内层 | ✅ 双层 |
+
+玻璃滴要用 `rememberCombinedBackdrop(pageBackdrop, tabBarBackdrop)` 合成两层采样源 ——
+它折射的是底栏自己的图标和文字，不是底下的页面。只用一个 backdrop 时滴里空无一物。
+
+纯图标后文字不再是可见信息，已挂到 `contentDescription` 上，读屏仍能念出「文档」「书签」。
+
+### 二、底栏不再「透明到看不清」
+
+截图里设置页的「默认保存方式 / 覆盖…」直接压在底栏图标上。三层一起修：
+
+- 底栏材料底色：`12% + 20%` 白 → `onDrawSurface` 25% 白 / 55% 黑
+- 宿主底部渐变：`pageBg` 55% 单段 → 三段式 `0% → 72% → 100%`，起点从 78% 提到 62%
+- 「我的」Tab 改为入口页，完整设置走独立路由（`Routes.SETTINGS`），不再把密集说明文字
+  压在底栏上
+
+### 三、PDF 页面自适应屏幕宽度
+
+旧版在 `PageItem` 里固定 `padding(horizontal = 16.dp)`，外层又扣一次，
+小屏上页面只剩屏幕宽度的 90% 左右 —— 看起来就是「只占中间一小条」。
+
+现在按实测可用宽度分档：
+
+```kotlin
+val hPad = if (contentWidthDp < 360.dp) 6.dp else 10.dp
+val pageWidthPx = (contentWidthPx - hPadPx * 2).toInt()
+```
+
+传下去的就是「扣完留白的宽度」，`PageItem` 内部不再二次相减，渲染宽度与显示宽度严格一致。
+
+`contentWidthDp` 由 `contentWidthPx ÷ density` 算出，不用 `Configuration.screenWidthDp` ——
+后者在分屏 / 折叠屏展开态下与实测宽度对不上（v1.5.1 踩过）。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 单测 | ✅ 206 项 0 失败 |
+| Lint | ✅ 0 error / 11 warning |
+| APK | 22,346,473 字节 |
+| 签名 | SHA-256 `1590d022…`，可覆盖升级 |
+
+`DockIntegrationTest` 原本靠「五项都有文字节点」定位底栏，改为纯图标后必然失败 ——
+这是正确的不通过。已改为按 `contentDescription` 定位。
 
 ## 1.7.1 变更
 

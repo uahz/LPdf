@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
@@ -26,7 +25,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.lpdf.reader.ui.glass.GlassTab
 import com.lpdf.reader.ui.glass.GlassTabBar
@@ -109,15 +107,26 @@ fun RootTabHost(
 
         // -------- L4：玻璃底栏 --------
         overlay = {
-            // 底部渐深：白底 PDF 缩略图会从底栏边缘透上来，压一层让文字更清楚。
-            // 从 78% 高度开始，避免覆盖到内容区的可读范围。
+            // 底部渐深（v1.7.2 加强）。
+            //
+            // 旧版是 `pageBg.copy(alpha = 0.55f)`，从 78% 高度开始渐入。
+            // 问题在于它**只是一层 55% 的半透明色**：设置页的文字仍然
+            // 原样透上来，和底栏的图标叠在一起（用户截图里「默认保存方式」
+            // 直接压在「文档 / 书签」上）。
+            //
+            // 现在改成三段：
+            //   ① 92% 的不透明底 —— 内容在底栏区域基本被压平
+            //   ② 起止点上移到 0.62，给底栏留出足够的过渡带
+            //   ③ 底栏本身另有 blur + 25%/55% 材料底色，两层叠加后
+            //      对比度足够，不再需要靠「看清底下」来维持玻璃感
             Box(
                 Modifier
                     .fillMaxSize()
                     .background(
                         Brush.verticalGradient(
-                            0.78f to Color.Transparent,
-                            1f to colors.pageBg.copy(alpha = 0.55f)
+                            0.62f to colors.pageBg.copy(alpha = 0f),
+                            0.86f to colors.pageBg.copy(alpha = 0.72f),
+                            1f to colors.pageBg
                         )
                     )
             )
@@ -142,6 +151,11 @@ private fun TabDock(
     // 一旦 remember 住，宿主重组后传进来的新回调就再也进不去了 ——
     // 表现为「重复点 Tab 没反应」，而且极难排查。
     // 这里只有 5 个对象，每帧重建的开销可以忽略。
+    //
+    // v1.7.2：五个 Tab 全部是纯图标（iOS 26 的真实形态）。
+    // 旧版每项都挂文字，中文两字在窄屏上必然压到相邻项；
+    // iOS 只在当前项下方显示文字，所以这里的 label 只作为无障碍描述使用，
+    // 是否显示由 GlassTabBar 内部按选中态决定。
     val items = RootTab.bar.map { tab ->
         GlassTab(
             icon = tab.icon,
@@ -162,6 +176,9 @@ private fun TabDock(
             onSelect = { i ->
                 RootTab.bar.getOrNull(i)?.let { if (it != selected) onSelect(it) }
             },
+            // 64dp 外筐（= iOS 26 的 tab bar 高度）。阅读页工具栏仍用 56dp 紧凑形态，
+            // 两者的差异是有意的：工具栏只是一排瞬动按钮，不该有 tab bar 的体量。
+            height = 64.dp,
             modifier = Modifier.padding(horizontal = LSpace.pageHorizontal)
         )
     }

@@ -76,9 +76,24 @@ import kotlinx.coroutines.launch
 fun SettingsPage(
     container: AppContainer,
     settings: AppSettings,
-    /** 独立打开时显示返回按钮；作为「我的」Tab 内嵌时为 null */
-    onBack: (() -> Unit)? = null
+    /**
+     * 非 null 时是独立页面模式（显示返回按钮），
+     * 为 null 时是「我的」Tab 内嵌的主屏 —— 只放入口，不铺开设置项。
+     */
+    onBack: (() -> Unit)? = null,
+    /** 从「我的」主屏进入完整设置页 */
+    onOpenSettings: (() -> Unit)? = null
 ) {
+    // 内嵌且没有提供跳转时退化为旧行为（整页铺开），
+    // 保证独立调用方不必改代码也不会看到空白页。
+    if (onBack == null && onOpenSettings != null) {
+        ProfileHome(
+            settings = settings,
+            onOpenSettings = onOpenSettings,
+            onOpenAbout = { }
+        )
+        return
+    }
     val colors = LocalColors.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -457,6 +472,97 @@ fun SettingsPage(
                     .align(Alignment.TopCenter)
                     .padding(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp)
             )
+        }
+    )
+}
+
+// ---------------------------------------------------------------------------
+// 「我的」主屏（v1.7.2 新增）
+// ---------------------------------------------------------------------------
+
+/**
+ * 「我的」Tab 的主屏。
+ *
+ * ## 为什么不再直接铺设置页
+ *
+ * v1.6.0 把完整的 [SettingsPage] 塞进了 Tab 宿主，结果是：
+ * 设置页那些密集的说明文字就压在玻璃底栏上方，两者仅隔 120dp 的
+ * contentPadding，滚动时文字会从底栏里透上来（v1.7.2 用户截图）。
+ *
+ * 更重要的是信息架构错了：iOS 的「我的 / 资料库」Tab 是一屏**入口**，
+ * 点进去才是设置。这一屏只放最能体现当前状态的几项 + 一个「设置」入口，
+ * 既解决了遮挡，也符合 iOS 的心智。
+ */
+@Composable
+private fun ProfileHome(
+    settings: AppSettings,
+    onOpenSettings: () -> Unit,
+    onOpenAbout: () -> Unit
+) {
+    val colors = LocalColors.current
+    val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+
+    LiquidGlassScope(
+        modifier = Modifier.background(colors.pageBg),
+        content = {
+        Column(Modifier.fillMaxSize()) {
+            Spacer(Modifier.height(topInset + 8.dp))
+            Text(
+                "我的",
+                style = LType.TitleL,
+                color = colors.text,
+                modifier = Modifier.padding(horizontal = LSpace.pageHorizontal)
+            )
+            Spacer(Modifier.height(16.dp))
+
+            LazyColumn(
+                contentPadding = PaddingValues(
+                    start = LSpace.pageHorizontal,
+                    end = LSpace.pageHorizontal,
+                    // 底栏 64dp + 12dp 悬浮间距 + 一段呼吸，
+                    // 取 116dp 保证最后一行滚到底时不会被玻璃压住
+                    bottom = 116.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(22.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                item {
+                    GlassGroup(title = "阅读") {
+                        InfoRow(
+                            "翻页方式",
+                            if (settings.readingMode == ReadingMode.CONTINUOUS) "连续" else "单页",
+                            LIcon.List
+                        ) { onOpenSettings() }
+                        GlassDivider()
+                        InfoRow(
+                            "主题",
+                            when (settings.themeMode) {
+                                ThemeMode.SYSTEM -> "跟随系统"
+                                ThemeMode.LIGHT -> "浅色"
+                                ThemeMode.DARK -> "深色"
+                            },
+                            LIcon.Sliders
+                        ) { onOpenSettings() }
+                        GlassDivider()
+                        InfoRow(
+                            "默认保存方式",
+                            if (settings.saveMode == SaveMode.SAVE_AS) "另存为" else "覆盖原文件",
+                            LIcon.Compress
+                        ) { onOpenSettings() }
+                    }
+                }
+
+                item {
+                    GlassGroup(title = "应用") {
+                        InfoRow("设置", "全部选项", LIcon.Gear) { onOpenSettings() }
+                        GlassDivider()
+                        InfoRow("版本", "v${BuildConfig.VERSION_NAME}", LIcon.Info) { onOpenAbout() }
+                    }
+                }
+
+                item { Spacer(Modifier.height(8.dp)) }
+            }
+        }
         }
     )
 }
