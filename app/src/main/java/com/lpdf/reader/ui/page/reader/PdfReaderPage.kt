@@ -326,14 +326,22 @@ fun PdfReaderPage(
                     // 本页上半截 + 下一页开头，观感就是「页面在中间一小条里滚动」。
                     // 这里只在**首屏**（还没滚动过）收紧宽度，让一整页落在可见区内；
                     // 用户第一次滚动之后立刻恢复铺满，不去干扰正常的连续阅读。
+                    // 连续模式只扣顶部工具条：页码胶囊盖的是列表底部，
+                    // 页面正常从它下面滑过，用它的高度限制页面等于平白少显示 100dp。
                     val densityNow = LocalDensity.current.density
-                    val viewportH = PageFit.contentHeightPx(
+                    val viewportH = PageFit.scrollViewportHeightPx(
                         availableHeightPx = contentHeightPx,
                         density = densityNow,
                         chromeVisible = state.chromeVisible
                     )
-                    val firstAspect = remember(state.docKey) {
-                        vm.renderFor(state.currentPage)?.aspect ?: 1.4142f
+                    // 首屏判断用的宽高比：只要当前页已经拿到真实比例就立刻换上。
+                    //
+                    // 打开文档的那一瞬间渲染还没开始，这里只能拿到 A4 兜底值。
+                    // 若只在 docKey 变化时 remember 一次，A4 兜底值会被永久锁住 ——
+                    // 一本 16:9 横排 PDF 明明一屏放得下，却按 A4 判成溢出并缩小。
+                    val realAspect = vm.renderFor(state.currentPage)?.aspect
+                    val firstAspect = remember(state.docKey, realAspect) {
+                        realAspect ?: 1.4142f
                     }
                     val atTop = listState.firstVisibleItemIndex == 0 &&
                         listState.firstVisibleItemScrollOffset < 8
@@ -864,6 +872,11 @@ private fun PageCanvas(
         density = density,
         chromeVisible = chromeVisible
     )
+    // 按「可用高度」算渲染宽度即可。
+    //
+    // 这里**不能**再夹一道 `MAX_SINGLE_PAGE_RATIO` 上限：渲染只是确定位图分辨率，
+    // 显示尺寸由下方 fillMaxSize + aspectRatio 决定，位图多一点余量反而让放大时更清晰。
+    // 上限是显示侧的约束，夹在这里只会白渲一张过小的图，放大到 3x 立刻糊。
     val targetWidthPx = if (widthPx > 0) {
         PageFit.fitWidthPx(widthPx, usableHeightPx, aspectForFit)
     } else 0
@@ -930,9 +943,11 @@ private fun PageCanvas(
                 // 取负约束（Infinity）在压缩时会出现，coerceAtLeast 兜住
                 val boxW = constraints.maxWidth.let { if (it == Int.MAX_VALUE) widthPx else it }
                     .toFloat().coerceAtLeast(1f)
-                val fitW = PageFit.fitWidthPx(
+                // 显示宽度夹上 0.92 上限：横屏平板上 A4 不能拉成满宽，
+                // 否则高度必然超出可用区，页面头尾又被玻璃条压回去。
+                val fitW = PageFit.singlePageDrawWidthPx(
                     contentWidthPx = boxW.roundToInt(),
-                    contentHeightPx = usableHeightPx,
+                    availableHeightPx = usableHeightPx,
                     aspect = safeAspect
                 ).toFloat()
                 val drawW = with(LocalDensity.current) { fitW.toDp() }

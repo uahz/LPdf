@@ -176,4 +176,71 @@ class PageFitTest {
         assertTrue(PageFit.contentHeightPx(0, 3f, true) > 0)
         assertTrue(PageFit.contentHeightPx(-100, 3f, false) > 0)
     }
+
+    // ---------------------------------------------------------------- 回归补充（自查）
+
+    @Test
+    fun `连续模式视口高度只扣顶部工具条`() {
+        // 页码胶囊盖的是列表底部，页面正常从它下面滑过。
+        // 用 contentHeightPx（还扣了胶囊）会平白少 100dp 可用高度。
+        val h = 2400
+        val scroll = PageFit.scrollViewportHeightPx(h, 3f, true)
+        val single = PageFit.contentHeightPx(h, 3f, true)
+        assertTrue("连续视口应比单页可用区更高", scroll > single)
+        assertEquals("两者差值应等于底部胶囊占位", PageFit.BOTTOM_CHROME_DP * 3f, (scroll - single).toFloat(), 2f)
+    }
+
+    @Test
+    fun `横屏平板单页不应把 A4 拉成满宽`() {
+        // 2560 宽的内容区，按高度只能放到 900 左右；若按满宽画，
+        // 高度 3621 远超可用区，页面头尾被玻璃条压住。
+        val w = 2560
+        val usable = PageFit.contentHeightPx(1600, 2f, true)
+        val draw = PageFit.singlePageDrawWidthPx(w, usable, a4)
+        assertTrue("不应超过内容区 92%", draw <= (w * PageFit.MAX_SINGLE_PAGE_RATIO).toInt())
+        assertTrue("高度仍须落在可用区内", draw * a4 <= usable + 4)
+    }
+
+    @Test
+    fun `屏越矮页面越宽 这正是本次自适应要的效果`() {
+        // 360×800dp（1080×2400）扣掉玻璃条后可用高 1920，A4 能放满宽 1080；
+        // 360×640dp（1080×1920）只剩 1440，只能放到 1018 —— 但这时页面仍然铺得很满。
+        // 关键在于「高度足够时按宽，不够时按高」，而不是永远铺满或永远缩一截。
+        val usableTall = PageFit.contentHeightPx(2400, 3f, true)
+        val tall = PageFit.singlePageDrawWidthPx(1080, usableTall, a4)
+        // 高屏上按高度算出的宽度本来就超过内容区宽，被 1080 夹住；
+        // 再叠上 92% 视觉呼吸上限，最终就是 992 —— 这是有意的，不是缩水。
+        assertEquals("高屏应顶到 92% 上限（保留视觉呼吸）", 992, tall)
+        assertTrue("顶到上限时仍应几乎铺满", tall > 1080 * 0.9f)
+
+        val usableShort = PageFit.contentHeightPx(1920, 3f, true)
+        val short = PageFit.singlePageDrawWidthPx(1080, usableShort, a4)
+        assertTrue("矮屏应缩到装得下", short < 1080)
+        assertTrue("但不应缩到 92% 上限以下太多", short > 1080 * 0.9f)
+        assertTrue("缩完高度仍应落在可用区内", short * a4 <= usableShort + 4)
+    }
+
+    @Test
+    fun `非法输入不会让单页宽度变成 0`() {
+        listOf(
+            Triple(0, 0, a4),
+            Triple(1080, 0, a4),
+            Triple(1080, 2000, 0f),
+            Triple(1080, 2000, Float.NaN)
+        ).forEach { (w, h, a) ->
+            val draw = PageFit.singlePageDrawWidthPx(w, h, a)
+            assertTrue("输入 ($w,$h,$a) 得到宽度 $draw", draw > 0)
+        }
+    }
+
+    @Test
+    fun `渲染宽度就是显示宽度上限 不应再夹 92 上限`() {
+        // PageCanvas 的渲染宽度直接取 fitWidthPx（按可用高度），显示侧才夹 92%。
+        // 如果把 92% 也套到渲染上，位图会比显示宽度小 8%，
+        // 放大到 2x 立刻看到糊边 —— 省下的那点内存不值。
+        val usable = PageFit.contentHeightPx(2400, 3f, true)
+        val render = PageFit.fitWidthPx(1080, usable, a4)
+        val shown = PageFit.singlePageDrawWidthPx(1080, usable, a4)
+        assertTrue("渲染宽度应 ≥ 显示宽度", render >= shown)
+    }
 }

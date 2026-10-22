@@ -80,6 +80,44 @@ object PageFit {
     }
 
     /**
+     * 连续滚动模式的可用高度：只扣顶部工具条。
+     *
+     * 不能复用 [contentHeightPx] —— 那个是给单页模式用的，还扣了底部页码胶囊。
+     * 连续模式下页码胶囊盖的是**滚动列表的底部**，页面正常滑过它下面，
+     * 用它的高度去限制页面尺寸等于平白少显示 100dp 的内容。
+     */
+    fun scrollViewportHeightPx(availableHeightPx: Int, density: Float, chromeVisible: Boolean): Int {
+        if (availableHeightPx <= 0) return 1
+        if (!chromeVisible) return availableHeightPx
+        val reserve = (TOP_CHROME_DP * density).toInt()
+        return (availableHeightPx - reserve).coerceAtLeast((80 * density).toInt())
+    }
+
+    /**
+     * 单页模式的实际绘制宽度（px）。
+     *
+     * [fitWidthPx] 的结果要再夹到内容区宽度的 [MAX_SINGLE_PAGE_RATIO] 以内，
+     * 不能在横屏平板上把 A4 拉成满宽：那时候高度才是瓶颈，
+     * 强行铺满会让页面高度超出可用区，头尾又被玻璃条压回去。
+     *
+     * @param contentWidthPx 内容区宽度（已扣系统栏）
+     */
+    fun singlePageDrawWidthPx(contentWidthPx: Int, availableHeightPx: Int, aspect: Float): Int {
+        val cap = (contentWidthPx * MAX_SINGLE_PAGE_RATIO).toInt()
+        val fitted = fitWidthPx(contentWidthPx, availableHeightPx, aspect)
+        return minOf(fitted, cap).coerceAtLeast(2) / 2 * 2
+    }
+
+    /**
+     * 单页模式页面最大占据内容区宽度的比例。
+     *
+     * 0.92：留一点视觉呼吸，又不至于看起来「页面比屏幕窄一截」。
+     * 这个上限只影响**横屏 / 平板**这类宽度富余的场景；
+     * 手机上真正起约束的一直是高度。
+     */
+    const val MAX_SINGLE_PAGE_RATIO = 0.92f
+
+    /**
      * 单页模式「一屏看全」的页面宽度（px）。
      *
      * @param contentWidthPx 内容区宽度（物理像素）

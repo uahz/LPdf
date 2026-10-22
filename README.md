@@ -1,4 +1,4 @@
-# LPdf 1.7.3 · Android PDF 阅读器
+# LPdf 1.7.4 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.7.3-release.apk
+adb install -r dist/LPdf-1.7.4-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -27,7 +27,7 @@ export JAVA_HOME=/opt/jdk21
 export ANDROID_HOME=/opt/android-sdk
 ./gradlew :app:assembleRelease       # 产物 app/build/outputs/apk/release/
 ./gradlew :app:assembleDebug         # 仅供本地调试，不发布
-./gradlew :app:testDebugUnitTest     # 221 个单测
+./gradlew :app:testDebugUnitTest     # 226 个单测
 ./gradlew :app:lintDebug             # 静态检查，0 error 才算过
 ```
 
@@ -36,6 +36,22 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.7.4 变更
+
+自查 1.7.3 时发现并修掉 3 个 bug，都是自适应尺寸的边界情况：
+
+1. **连续模式误扣了页码胶囊的高度**。`contentHeightPx` 是给单页模式用的（扣顶部工具条 + 底部胶囊），连续模式却复用了它。连续模式里页码胶囊盖的是列表底部、页面正常从它下面滑过，扣掉它等于平白少 100dp 可用高度，矮屏上会被误判成「装不下」而缩小页面。新增 `scrollViewportHeightPx()` 只扣顶部
+2. **横屏 / 平板上 A4 可能被拉成满宽**。宽度只受「按高算」和「按屏宽」两个约束，缺「不超过内容区 92%」的护栏。宽度富余、高度吃紧的窗口里会顶满整宽，高度随之超限、头尾又被玻璃条压回。新增 `singlePageDrawWidthPx()` 补上护栏（只作用于显示，不影响渲染分辨率）
+3. **首屏宽高比被 A4 兜底值锁死**。`remember` 的 key 只有 `docKey`，打开那一瞬间渲染还没开始、拿到的是 A4 兜底值，于是被永久锁住。16:9 横排 PDF 明明一屏放得下，却被按 A4 判成溢出并白白缩小。key 里加入真实宽高比后修复
+
+| 项 | 结果 |
+| --- | --- |
+| 单测 | **226 项，0 失败**（新增 5 项覆盖上述边界） |
+| Lint | **0 error / 11 warning** |
+| 包信息 | `versionCode=174` / `versionName=1.7.4` |
+| APK | 22,346,473 字节 |
+| 签名 | 与 1.1.0 以来一致，可覆盖升级 |
 
 ## 1.7.3 变更
 
