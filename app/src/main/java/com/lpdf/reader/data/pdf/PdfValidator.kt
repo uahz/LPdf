@@ -1,5 +1,6 @@
 package com.lpdf.reader.data.pdf
 
+import android.annotation.SuppressLint
 import android.content.ContentResolver
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -92,6 +93,9 @@ class PdfValidator(private val resolver: ContentResolver) {
      */
     private fun readTail(uri: Uri, len: Int): ByteArray {
         runCatching {
+            // AssetFileDescriptor 与内层 FileInputStream 各管各的：外层 afd.use 关 afd，
+            // 内层 fis.use 关它自己包装的 fd 句柄。Lint 对「?.use」推断不出关闭路径，属误报。
+            @SuppressLint("Recycle")
             resolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
                 val length = afd.length
                 if (length > len) {

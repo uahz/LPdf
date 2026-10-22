@@ -68,7 +68,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -168,8 +167,11 @@ fun PdfReaderPage(
         if (targetUri != null) vm.exportFlattened(targetUri)
     }
 
-    // 阅读时常亮
-    val activity = LocalContext.current as? android.app.Activity
+    // 阅读时常亮。
+    // 用 LocalActivity 而不是 `LocalContext.current as? Activity`：
+    // Compose 会往 LocalContext 里塞 ContextWrapper（如主题包装），强转成 Activity 会拿到 null，
+    // 表现为「常亮开关点了没反应」。LocalActivity 是 activity-compose 提供的正规通路。
+    val activity = androidx.activity.compose.LocalActivity.current
     LaunchedEffect(settings.keepScreenOn) {
         if (settings.keepScreenOn) {
             activity?.window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

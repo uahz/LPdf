@@ -1,4 +1,4 @@
-# LPdf 1.5.2 · Android PDF 阅读器
+# LPdf 1.7.1 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.5.2-release.apk
+adb install -r dist/LPdf-1.7.1-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -27,7 +27,8 @@ export JAVA_HOME=/opt/jdk21
 export ANDROID_HOME=/opt/android-sdk
 ./gradlew :app:assembleRelease       # 产物 app/build/outputs/apk/release/
 ./gradlew :app:assembleDebug         # 仅供本地调试，不发布
-./gradlew :app:testDebugUnitTest     # 135 个单测
+./gradlew :app:testDebugUnitTest     # 206 个单测
+./gradlew :app:lintDebug             # 静态检查，0 error 才算过
 ```
 
 **签名配置**：`keystore.properties` 与 `keystore/` 均不入库。首次构建若无这两者，
@@ -35,6 +36,125 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.7.1 变更
+
+收尾版本，不加功能。两件事：**减重**、**把静态检查真正跑起来**。
+
+### 一、APK 从 29.6 MB 降到 22.3 MB（−23.5%）
+
+删掉了一个从未被使用的依赖：PDFBox。
+
+一条 `grep -rn "PDFBox\|PDDocument" app/src/` 返回 0 处引用 —— 它从引入那天起就是个
+纯负担。但删掉后减了 **7.26 MB**，而不是预期的 4.4 MB，多出来的部分是排查时才发现的：
+
+**PDFBox 拖进来了 BouncyCastle。** APK 内 `org/bouncycastle/pqc/crypto/` 下有 4 个抗量子
+密码（SIKE / PICNIC）的参数量化表，单个 `lowmc.properties` 就有 3.6 MB：
+
+```
+3,640,348  org/bouncycastle/pqc/crypto/picnic/lowmc.properties
+1,939,925  org/bouncycastle/pqc/crypto/sike/p751.properties
+1,154,869  org/bouncycastle/pqc/crypto/sike/p610.properties
+  765,399  org/bouncycastle/pqc/crypto/sike/p503.properties
+```
+
+PDFBox 用它们做 PDF 签名验签。本应用不做 PDF 数字签名，**这 7.5 MB 一个字节都没用上**。
+
+| 项 | v1.7.0 | v1.7.1 |
+| --- | --- | --- |
+| APK 总大小 | 29,589,108 | **22,330,098** |
+| `classes.dex` | 4.43 MB | 2.97 MB |
+| APK 内 `org/` 目录 | 7.9 MB | 0 |
+
+### 二、Lint 恢复进 CI
+
+原来的配置是 `abortOnError = false` —— 跑完也不管结果，等于没查。但它不是"忘了开"，
+而是**一开就崩**，当初只好关掉。
+
+真因：Compose BOM 2025.04.01 的 lint 包按 Kotlin 1.x 编译，那时 `KaFunctionCall` /
+`KaSimpleVariableAccessCall` 是接口；Kotlin 2.1 把它们改成了类，检测器加载时 JVM 直接
+抛 `IncompatibleClassChangeError`。
+
+关一条会崩换下一条接着崩，索性反编译 `lint.jar` 一次查清，把所有依赖 `KaCallInfoKt` /
+`KaSessionProvider` 的 5 个检测器全部 disable：
+
+| 检测器 | issue id | 作用 |
+| --- | --- | --- |
+| `AutoboxingStateCreation` | 同名 | 建议用 `mutableIntStateOf` 代替 `mutableStateOf(0)` |
+| `RememberInComposition` | 同名 | 禁止在 Composable 函数体里调 `remember` |
+| `FrequentlyChangingValue` | 同名 | 高频变化值不应被 remember 读取 |
+| `ComposableStateFlowValue` | **`StateFlowValueCalledInComposition`** | 禁止组合中直接读 `StateFlow.value` |
+| `MutableCollectionMutableState` | 同名 | 禁止 `mutableStateOf(mutableListOf())` |
+
+这五个都是代码风格类检查，不涉及行为正确性。
+
+> 踩坑记录：`ComposableStateFlowValue` 不是 issue id，写它会报 `UnknownIssueId` 且**不生效**；
+> `FrequentlyChangingValue` 会崩是因为它复用了 `RememberInCompositionDetectorKt` 的辅助函数，
+> 只关前者没用。
+
+CI 新增独立 `lint` job（`--no-parallel` 防 OOM），`build` 改为 `needs: [ test, lint ]`。
+
+**效果：2 error / 26 warning → 0 error / 11 warning。**
+
+### 三、Lint 跑起来后暴露的 3 个真实缺陷
+
+#### ① 静态 `SimpleDateFormat` —— 并发错乱 + 切语言失效
+
+```kotlin
+// 原来
+private val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+```
+
+- **线程不安全**：内部有可变 `Calendar`，并发 `format()` 互相污染，可能抛 `ArrayIndexOutOfBoundsException`
+- **Locale 冻结**：在 `object` 初始化那一刻定死，用户运行中切语言后日期格式不跟着变
+
+改为每次新建（开销几微秒，正确性优先）。
+
+#### ② 阅读页常亮用 `LocalContext.current as? Activity`
+
+Compose 会往 `LocalContext` 里塞 `ContextWrapper`（主题包装等），强转拿到 `null`，
+`activity?.window` 全部静默跳过 —— 表现是"常亮开关点了，界面没变化，也不报错"。
+改用 `LocalActivity.current`。
+
+#### ③ 缺少 `monochrome` 图标层
+
+Android 13+ 主题图标会取单色层做渲染。缺失时本应用在开了主题图标的桌面上显示成一个
+彩色方块，与周围适配过的应用格格不入。新增 `ic_launcher_monochrome.xml`：几何形状与原
+前景一致，但做成"实心文档 + 镂空文字横线"—— 系统只取 alpha 通道再统一刷色，
+直接用彩色原图会把文字线和底色糊成一片。
+
+### 四、其余 Lint 项
+
+真问题就修（`ContextCastToActivity`、`ConstantLocale`、`MonochromeLauncherIcon`、
+`DataExtractionRules`、`UseOfNonLambdaOffsetOverload`、`UseTomlInstead`），
+误报就加抑制并写明原因（`Recycle` ×3 —— 那些 `query()` 全部紧跟 `?.use { }`，
+`Closeable.use` 保证异常路径也关闭，Lint 识别不了这种写法）；
+防御性代码保留并 `@Suppress`（`ObsoleteSdkInt`，"将来降 minSdk 不用改"）。
+
+`GradleDependency`（lifecycle 2.8.7 → 2.9.4）不动：跨版本升级留到 v1.8.0 与 Compose 一起动。
+
+### 五、验证
+
+| 项 | 结果 |
+| --- | --- |
+| 编译（`--rerun-tasks` 全量重编） | ✅ |
+| 单元测试 | ✅ 206 项，0 失败 |
+| Lint | ✅ 0 error / 11 warning |
+| APK 版本 | ✅ `versionCode=171, versionName=1.7.1` |
+| 签名 | ✅ 与 1.6.1 / 1.7.0 一致，可覆盖升级 |
+| 包内残留 | ✅ 无 `tom_roush`、无 `org/bouncycastle` |
+| Manifest | ✅ `dataExtractionRules` 生效、`CAMERA` 权限未出现在最终包 |
+
+## 1.7.0 变更
+
+阅读体验四项：文本选择与复制、缩放以手指为锚点、夜间模式页面真反色、缩略图预生成队列。
+
+- **文本选择**：拖选语义是「起点行取到行尾、终点行从行首开始、中间行整行」。
+  用索引区间会得到 `DE\nFGHIJ` 这种错误结果，正确应是 `CDE\nFGH` —— 这个区别在
+  `TextSelectionTest` 里用布局表注释锁住了
+- **缩放锚点**：`c = (p - t) / s` 要求缩放后 c 仍在 p 处，推出 `t' = p - (p - t)·s'/s`
+- **夜间反色**：真反色，不叠滤色片。滤色片把整页亮度压低，白底变深灰、黑字变更黑，对比度反而更低
+- **缩略图预热**：`Channel` 容量 32 + 串行 pump + 去重，`PREWARM_AHEAD = 12`
 
 ## 1.5.2 / 1.5.1 变更
 
@@ -442,4 +562,10 @@ app/src/main/java/com/lpdf/reader/
 - **表单填写 / 元数据编辑**：引擎与数据模型已具备，UI 尚未接入，属 v2.0 范围。
 - **签名只支持图片形式**：手写签名保存为 PNG 后作为图片标注叠加，不是 PDF 数字签名（不含证书与时间戳），不具备法律意义上的防篡改能力。
 - **搜索不做跨页合并**：跨页断行的词会被拆成两处命中，属于文本层特性，暂未做后处理。
-- **Lint 被关闭**：AGP 8.7.3 自带的 `NullableMutableLiveData` 检测器在 JDK 21 上抛 `IncompatibleClassChangeError`，已在 `app/build.gradle.kts` 中 `disable` + `abortOnError = false`，计划 v2.0 修复。
+- **Lint 覆盖不全**：5 个 Compose 检测器（`AutoboxingStateCreation` / `RememberInComposition` /
+  `FrequentlyChangingValue` / `StateFlowValueCalledInComposition` / `MutableCollectionMutableState`）
+  因上游 lint 包与 Kotlin 2.1 分析 API 不兼容而崩溃，已 `disable`。其余检查已恢复并在 CI 强制
+  `abortOnError = true`，当前 0 error / 11 warning。根因修复要等 Compose 发布适配 Kotlin 2.1 的
+  lint 包，届时删掉那几行即可。
+- **未做国际化**：全部 UI 文案硬编码中文（462 处），`strings.xml` 仅 1 条，`HardcodedText` 已 disable。
+  这是 v2.0.0 的头号事项。

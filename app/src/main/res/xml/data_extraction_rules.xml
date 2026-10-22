@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 12+ 的备份 / 设备迁移规则。
+
+    本应用 allowBackup="false"，即「所有数据都不上云备份」。
+    但 Android 12 起系统改为优先读取本文件，若缺失，
+    部分 ROM（以及未来的系统版本）会退回默认策略 —— 也就是**会**备份。
+    这里显式写空规则，把「不备份」的意图表达完整。
+
+    阅读进度、标注、书签都是本地 JSON/DataStore，
+    走用户自己的网盘/换机助手迁移反而容易产生半份数据，
+    故 device-transfer 也一并关闭。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </device-transfer>
+</data-extraction-rules>

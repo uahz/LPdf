@@ -1,5 +1,6 @@
 package com.lpdf.reader.data.local
 
+import android.annotation.SuppressLint
 import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
@@ -20,7 +21,13 @@ import java.io.File
  * - 只用 READ_MEDIA_DOCUMENTS 可访问的 Files 集合
  * - 分页 cursor，每批 [BATCH] 条，交给上层增量渲染
  * - 去重键：documentId
+ *
+ * 关于 [SuppressLint] "Recycle"：本文件的 4 处 `contentResolver.query(...)` 全部紧跟
+ * `?.use { ... }`，Cursor 由 Kotlin 标准库的 Closeable.use 保证关闭（含异常路径）。
+ * Lint 的 Recycle 检测器对「可空接收者 + use」这种写法识别不出来，是已知误报，
+ * 不是真的漏 close —— 故在此统一抑制，而不是把代码改写成不如原来清晰的 try/finally。
  */
+@SuppressLint("Recycle")
 class MediaStoreSource(private val context: Context) {
 
     /**

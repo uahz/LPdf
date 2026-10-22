@@ -41,8 +41,8 @@ android {
         applicationId = "com.lpdf.reader"
         minSdk = 33
         targetSdk = 35
-        versionCode = 170
-        versionName = "1.7.0"
+        versionCode = 171
+        versionName = "1.7.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -113,12 +113,45 @@ android {
     }
 
     lint {
-        // AGP 8.7.3 自带的 NonNullableMutableLiveDataDetector 在 JDK 21 上会抛
-        // IncompatibleClassChangeError（lint 侧缺陷，非工程代码问题），故关闭该条
+        // ---------- 已知在本工程工具链上会崩溃的检测器 ----------
+        // 这两条都是 lint / Compose lint 自身的缺陷（detector 与 Kotlin 分析 API 版本不匹配，
+        // 抛 IncompatibleClassChangeError），不是工程代码问题。关掉它们是为了让**其余**
+        // 几百条检查能真正跑起来 —— 比起「全都关掉」，这是损失最小的选择。
+        //
+        // 1) NullSafeMutableLiveData：AGP 8.7.3 自带检测器在 JDK 21 上抛 IncompatibleClassChangeError
         disable += "NullSafeMutableLiveData"
-        // 不再让 lint 阻断 release 打包；需要时用 ./gradlew :app:lint 单独跑
+        // 2) Compose runtime lint 的三个检测器：
+        //    Compose BOM 2025.04.01 的 lint 是按 Kotlin 1.x 分析 API 编译的
+        //    （KaFunctionCall / KaSimpleVariableAccessCall 当时是**接口**），
+        //    到 Kotlin 2.1 这些类型变成了类，加载时直接 IncompatibleClassChangeError。
+        //    受影响的是所有依赖 KaCallInfoKt / KaSessionProvider 的实现：
+        //      - AutoboxingStateCreation（KaCallInfoKt）
+        //      - RememberInComposition（KaCallInfoKt，被 FrequentlyChangingValue 复用）
+        //      - ComposableStateFlowValue（KaSessionProvider，issue id 为 StateFlowValueCalledInComposition）
+        //      - MutableCollectionMutableState（KaSessionProvider）
+        //    这些检测器的功能我们可以用代码评审替代，代价可接受；
+        //    真正会漏的是「无意义装箱 / 误用 mutableStateOf(mutableListOf)」这类风格问题，不影响行为。
+        //    根本修复要等 Compose 发布适配 Kotlin 2.1 的 lint 包，届时删掉这四行即可。
+        disable += "AutoboxingStateCreation"
+        disable += "RememberInComposition"
+        disable += "FrequentlyChangingValue"
+        disable += "MutableCollectionMutableState"
+        // 注意 ComposableStateFlowValueDetector 的 issue id 是 StateFlowValueCalledInComposition，
+        // 不是检测器类名 —— 写类名会被 lint 报 UnknownIssueId 且**不生效**。
+        disable += "StateFlowValueCalledInComposition"
+
+        // ---------- 已知可容忍的问题（有意识放行） ----------
+        // 项目未做国际化（v2.0.0 才做多语言），中文硬编码是既定状态，
+        // 逐条报出来只会淹没真正的问题；国际化立项时一并移除这条。
+        disable += "HardcodedText"
+
+        // 注意：这里**不能**设 abortOnError = false。
+        // 那等于「Lint 跑完也不管结果」，与本条检查的初衷相反。
+        // Lint 由 CI 单独跑（见 .github/workflows/build.yml 的 lint job），
+        // 日常 assemble 不再触发，避免拖慢装机流程。
         checkReleaseBuilds = false
-        abortOnError = false
+        abortOnError = true
+        warningsAsErrors = false
     }
 
     packaging {
@@ -152,9 +185,10 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     implementation(libs.pdfium.android)
-    implementation(libs.pdfbox.android)
+    // 不引入 PDFBox：全项目零使用，但会往 APK 里塞 4.4 MB（主要是 fontbox 的 112 个 cmap 资源）。
+    // 需要「改写 PDF 对象 / 元数据」时再引，且优先评估 pdfium 是否已够用。
     implementation(libs.okhttp)
-    implementation("androidx.documentfile:documentfile:1.0.1")
+    implementation(libs.androidx.documentfile)
     implementation(libs.liquid.glass)
 
     testImplementation(libs.junit)

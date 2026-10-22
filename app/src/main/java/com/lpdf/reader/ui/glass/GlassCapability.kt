@@ -91,6 +91,9 @@ object GlassProbe {
     """
 
     fun detect(): Pair<GlassLevel, String?> {
+        // 当前 minSdk=33，此判断恒为 false。保留是因为它是**能力探测的语义边界**，
+        // 而非版本适配补丁：若将来放宽 minSdk，这里不用改也不会崩。
+        @Suppress("ObsoleteSdkInt")
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             return GlassLevel.PLAIN to "系统低于 Android 13，无 RuntimeShader"
         }
@@ -112,8 +115,11 @@ object GlassProbe {
      * 且部分 ROM 的 RenderNode 实现会忽略它（不崩但无效果，可接受）。
      */
     fun detectBlur(): Boolean = try {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+        // 同 detect()：minSdk=33 下恒真，保留是为了能力探测逻辑自洽
+        @Suppress("ObsoleteSdkInt")
+        val ok = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             android.graphics.RenderEffect.createBlurEffect(1f, 1f, android.graphics.Shader.TileMode.CLAMP) != null
+        ok
     } catch (t: Throwable) {
         false
     }

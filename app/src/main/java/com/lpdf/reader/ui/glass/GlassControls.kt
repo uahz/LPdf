@@ -31,6 +31,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.lpdf.reader.ui.theme.LType
 import com.lpdf.reader.ui.theme.LocalColors
@@ -330,7 +331,9 @@ fun GlassSegmented(
         )
         Box(
             Modifier
-                .offset(x = segW * indicatorX.value + 3.dp)
+                // 用 lambda 重载：偏移量每帧都在变，非 lambda 版本会在每次重组时
+                // 重新读取 state 并触发不必要的重排；lambda 版本把读取延迟到 layout 阶段。
+                .offset { IntOffset((segW * indicatorX.value + 3.dp).roundToPx(), 0) }
                 .width(segW - 6.dp)
                 .height(height - 6.dp)
                 .align(Alignment.CenterStart)

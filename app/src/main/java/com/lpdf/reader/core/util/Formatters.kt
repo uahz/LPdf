@@ -11,9 +11,17 @@ import kotlin.math.abs
  */
 object Formatters {
 
-    private val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
-    private val monthDayFmt = SimpleDateFormat("M月d日", Locale.getDefault())
-    private val fullDateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+    /**
+     * 日期格式器。
+     *
+     * 刻意**不缓存**：[SimpleDateFormat] 不是线程安全的（共享实例在并发 format 时会
+     * 产生错乱结果，甚至抛 ArrayIndexOutOfBoundsException），而且把 Locale 在 object
+     * 初始化时固定下来，用户运行中切换语言后仍会显示旧语言格式。
+     *
+     * 每次新建的开销约几微秒，相对来说正确性更值钱。
+     */
+    private fun fmt(pattern: String): SimpleDateFormat =
+        SimpleDateFormat(pattern, Locale.getDefault())
 
     /** 2.4 MB / 812 KB / 1.2 GB */
     fun fileSize(bytes: Long): String {
@@ -37,7 +45,7 @@ object Formatters {
         val target = Calendar.getInstance().apply { timeInMillis = millis }
         val sameDay = today.get(Calendar.YEAR) == target.get(Calendar.YEAR) &&
             today.get(Calendar.DAY_OF_YEAR) == target.get(Calendar.DAY_OF_YEAR)
-        if (sameDay) return "今天 ${timeFmt.format(d)}"
+        if (sameDay) return "今天 ${fmt("HH:mm").format(d)}"
 
         // 昨天
         val yesterday = Calendar.getInstance().apply {
@@ -46,12 +54,12 @@ object Formatters {
         }
         val isYesterday = yesterday.get(Calendar.YEAR) == target.get(Calendar.YEAR) &&
             yesterday.get(Calendar.DAY_OF_YEAR) == target.get(Calendar.DAY_OF_YEAR)
-        if (isYesterday) return "昨天 ${timeFmt.format(d)}"
+        if (isYesterday) return "昨天 ${fmt("HH:mm").format(d)}"
 
         return if (today.get(Calendar.YEAR) == target.get(Calendar.YEAR)) {
-            monthDayFmt.format(d)
+            fmt("M月d日").format(d)
         } else {
-            fullDateFmt.format(d)
+            fmt("yyyy-MM-dd").format(d)
         }
     }
 

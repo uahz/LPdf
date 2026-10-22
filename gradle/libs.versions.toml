@@ -3,12 +3,11 @@ agp = "8.7.3"
 kotlin = "2.1.0"
 composeBom = "2025.04.01"
 activityCompose = "1.10.1"
-lifecycle = "2.8.7"
+lifecycle = "2.8.7"   # 2.9.x 可用，但属跨版本升级；留到 v1.8.0 与 Compose 一起动
 navigation = "2.8.9"
 datastore = "1.1.4"
 coroutines = "1.9.0"
 pdfium = "1.0.32"
-pdfbox = "2.0.27.0"
 okhttp = "4.12.0"
 junit = "4.13.2"
 robolectric = "4.14.1"
@@ -23,6 +22,7 @@ androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lif
 androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
 androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigation" }
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+androidx-documentfile = { group = "androidx.documentfile", name = "documentfile", version = "1.0.1" }
 
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 compose-ui = { group = "androidx.compose.ui", name = "ui" }
@@ -37,7 +37,6 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
 
 pdfium-android = { group = "io.legere", name = "pdfiumandroid", version.ref = "pdfium" }
-pdfbox-android = { group = "com.tom-roush", name = "pdfbox-android", version.ref = "pdfbox" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 liquid-glass = { group = "com.github.Kyant0", name = "AndroidLiquidGlass", version = "1.0.0-rc01" }
 

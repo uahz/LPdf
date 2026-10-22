@@ -1,0 +1,27 @@
+<!--
+    Android 13+ 主题图标（Themed Icon）用的单色前景。
+
+    系统只会取这里的 alpha 通道，再整体刷成壁纸取色后的单色。
+    因此这里刻意做成「实心文档 + 镂空文字横线」：
+    如果用彩色原图，三个色块的 alpha 都是不透明的，
+    刷成单色后文字线会和底完全糊在一起，认不出是什么图标。
+
+    几何形状与原 ic_launcher_foreground 完全对齐（同一套 pathData），
+    只是把「白色折角 + 蓝色文字线」改为用 evenOdd 镂空。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 文档外形 + 折角，整体实心 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M38,30 h22 l14,14 v34 a4,4 0 0,1 -4,4 h-32 a4,4 0 0,1 -4,-4 v-44 a4,4 0 0,1 4,-4 z M60,30 v10 a4,4 0 0,0 4,4 h10 z" />
+    <!-- 三条文字横线镂空 -->
+    <path
+        android:fillColor="#00000000"
+        android:fillType="evenOdd"
+        android:pathData="M44,58 h20 v3 h-20 z M44,64 h20 v3 h-20 z M44,70 h12 v3 h-12 z" />
+</vector>
