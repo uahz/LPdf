@@ -144,3 +144,16 @@ class MediaStoreSource(private val context: Context) {
         private const val MAX_TREE_FILES = 2000
     }
 }
+
+/**
+ * 一次性取全量结果。
+ *
+ * [MediaStoreSource.scan] 设计成流式（列表页要边扫边渲染，不能等全部扫完），
+ * 但「首页最近在读」「书签聚合」这类页面必须先有完整文档集合才能算键，
+ * 所以这里把回调攒成 List。仅用于非首屏关键路径。
+ */
+suspend fun MediaStoreSource.scanAll(): List<PdfItem> {
+    val out = ArrayList<PdfItem>()
+    scan { out += it }
+    return out
+}

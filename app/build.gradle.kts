@@ -41,8 +41,8 @@ android {
         applicationId = "com.lpdf.reader"
         minSdk = 33
         targetSdk = 35
-        versionCode = 152
-        versionName = "1.5.2"
+        versionCode = 160
+        versionName = "1.6.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -98,6 +98,18 @@ android {
         // 纯 JVM 单测（不带 @RunWith(RobolectricTestRunner)）里 android.util.Log 默认
         // 抛 "not mocked"。返回默认值让日志调用变成 no-op，测试只断言返回值。
         unitTests.isReturnDefaultValues = true
+    }
+
+    // 测试 JVM 必须跑在 JDK 21 及以上。
+    // 依赖 com.kyant:backdrop 打成 class 65（Java 21），而 Gradle 默认 JVM 落到
+    // JDK 20 时，Robolectric 测试会以 UnsupportedClassVersionError 全红 ——
+    // 报错看着像 "backdrop 类坏了"，实际只是测试 JVM 版本太低。
+    tasks.withType<Test>().configureEach {
+        javaLauncher.set(
+            javaToolchains.launcherFor {
+                languageVersion.set(JavaLanguageVersion.of(21))
+            }
+        )
     }
 
     lint {

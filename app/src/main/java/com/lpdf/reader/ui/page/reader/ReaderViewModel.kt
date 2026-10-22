@@ -204,6 +204,9 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
      */
     private var openJob: Job? = null
 
+    /** 调用方指定的起始页；-1 表示未指定（按上次进度） */
+    private var pendingStartPage: Int = -1
+
     /**
      * 当前文档的常驻渲染会话。
      *
@@ -213,8 +216,33 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
     @Volatile
     private var sessionRef: PdfiumEngine.DocSession? = null
 
-    fun bind(uriString: String, displayName: String, lastModified: Long, password: String?) {
-        if (docKey.isNotEmpty() && this.uri.toString() == uriString) return
+    /**
+     * @param startPage 指定起始页（0 基）；-1 = 按上次阅读进度。
+     *   v1.6.0 起书签页与首页「继续阅读」会带页号进来，
+     *   不能再用「上次进度」覆盖它 —— 否则点了第 80 页的书签却回到第 3 页。
+     */
+    fun bind(
+        uriString: String,
+        displayName: String,
+        lastModified: Long,
+        password: String?,
+        startPage: Int = -1
+    ) {
+        // 同一文档重复 bind 时直接返回，省掉一次重新打开。
+        // 但如果这次带了明确的起始页（从书签跳进来），就不能跳过 ——
+        // 那正是「已经在读这本书，又点它的书签」的场景。
+        //
+        // 判定「同一文档」必须同时比对 mtime：文件被重新导出过时 uri 不变、
+        // mtime 变了，此时 docKey 已经不同，缓存里的位图是旧内容，
+        // 早退会让用户看到上一版的文件。
+        val sameDoc = docKey.isNotEmpty() &&
+            this.uri.toString() == uriString &&
+            docKey == container.annotations.keyOf(uriString, lastModified)
+        if (sameDoc) {
+            if (startPage < 0) return
+            jumpTo(startPage)
+            return
+        }
         // 上一个文档的打开流程还没结束时必须掐掉，否则它晚一步返回会把
         // state 覆盖成旧文档的页数/目录。
         openJob?.cancel()
@@ -225,6 +253,7 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
         this.uri = Uri.parse(uriString)
         this.password = password
         this.docKey = container.annotations.keyOf(uriString, lastModified)
+        this.pendingStartPage = startPage
         _state.value = _state.value.copy(
             docKey = docKey,
             displayName = displayName,
@@ -260,6 +289,11 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
                     val saved = withContext(AppDispatchers.io) {
                         container.prefs.progressMapSnapshot(docKey)
                     }
+                    // 显式指定的页优先于上次进度
+                    val target = if (pendingStartPage >= 0) pendingStartPage else saved
+                    // 用完必须复位：否则在同一个 ViewModel 里换文档时
+                    // （bind 另一本书）会沿用上次的起始页，直接跳到那本书的第 N 页
+                    pendingStartPage = -1
                     // 目录也走会话，不再单独开一次文档
                     val toc = session.toc()
                     val doc = container.annotations.load(docKey)
@@ -267,7 +301,7 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
                     _state.value = _state.value.copy(
                         loading = false,
                         pageCount = count,
-                        currentPage = saved.coerceIn(0, (count - 1).coerceAtLeast(0)),
+                        currentPage = target.coerceIn(0, (count - 1).coerceAtLeast(0)),
                         toc = toc,
                         annotationCount = doc.count()
                     )
@@ -368,6 +402,13 @@ class ReaderViewModel(private val container: AppContainer) : ViewModel() {
 
     /** 某页的渲染失败原因；未失败返回 null。UI 据此把转圈换成可读提示。 */
     fun lastRenderError(page: Int): String? = synchronized(renderErrors) { renderErrors[page] }
+
+    /** 跳到指定页（已打开同一文档时用；触发页码同步与进度保存） */
+    fun jumpTo(page: Int) {
+        val max = _state.value.pageCount - 1
+        if (max < 0) return
+        onPageSettled(page.coerceIn(0, max))
+    }
 
     fun onPageSettled(page: Int) {
         if (_state.value.currentPage == page) return

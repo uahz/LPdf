@@ -86,7 +86,12 @@ class BookmarkStore(private val root: File) {
 
     /** 同一文档内所有书签的页码集合（列表页用于打角标） */
     suspend fun allKeys(): List<String> = withContext(Dispatchers.IO) {
-        dir.listFiles()?.mapNotNull { it.name.removeSuffix(".json").takeIf { n -> n.isNotEmpty() } }
+        // 只认 .json：removeSuffix 对 "abc.tmp" 这类名字不生效，
+        // 会把它原样当成 key 混进结果里
+        dir.listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".json") }
+            ?.map { it.name.removeSuffix(".json") }
+            ?.filter { it.isNotEmpty() }
             ?: emptyList()
     }
 

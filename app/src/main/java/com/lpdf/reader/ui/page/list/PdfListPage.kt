@@ -85,8 +85,6 @@ import com.lpdf.reader.ui.glass.GlassPillButton
 import com.lpdf.reader.ui.glass.GlassPopover
 import com.lpdf.reader.ui.glass.GlassSnackbarHost
 import com.lpdf.reader.ui.glass.GlassStateCard
-import com.lpdf.reader.ui.glass.GlassTab
-import com.lpdf.reader.ui.glass.GlassTabBar
 import com.lpdf.reader.ui.glass.LIcon
 import com.lpdf.reader.ui.glass.LIconView
 import com.lpdf.reader.ui.glass.LiquidGlass
@@ -120,8 +118,7 @@ import kotlinx.coroutines.launch
 fun PdfListPage(
     container: AppContainer,
     settings: AppSettings,
-    onOpenReader: (String, String) -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenReader: (uri: String, name: String, modified: Long) -> Unit,
     onOpenTools: (path: String, name: String, pages: Int) -> Unit = { _, _, _ -> }
 ) {
     val vm = rememberListViewModel(container)
@@ -146,7 +143,7 @@ fun PdfListPage(
         if (uri != null) {
             // 持久化失败的提示交给 ListViewModel.importFromUri 统一处理，
             // 那里知道 uri 是否真的拿到了长期授权，可以写进 PdfItem。
-            vm.importFromUri(uri) { item, _ -> onOpenReader(item.uri, item.displayName) }
+            vm.importFromUri(uri) { item, _ -> onOpenReader(item.uri, item.displayName, item.lastModified) }
         }
     }
     val pickTree = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -177,7 +174,7 @@ fun PdfListPage(
     }
 
     fun openItem(item: PdfItem) = vm.requestOpen(item) { it2, _ ->
-        onOpenReader(it2.uri, it2.displayName)
+        onOpenReader(it2.uri, it2.displayName, it2.lastModified)
     }
 
     val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
@@ -207,13 +204,9 @@ fun PdfListPage(
                             onClick = { showImport = true },
                             size = 40.dp
                         )
-                        Spacer(Modifier.width(8.dp))
-                        GlassIconButton(
-                            icon = LIcon.Gear,
-                            contentDescription = "设置",
-                            onClick = onOpenSettings,
-                            size = 40.dp
-                        )
+                        // 设置入口已移到「我的」Tab（v1.6.0）：
+                        // 文档页的三个按钮里出现一个「设置」会把「找文件」这件事打断，
+                        // 而设置是低频且与当前页无关的操作，属于「我的」。
                     }
                 )
 
@@ -342,27 +335,15 @@ fun PdfListPage(
                 }
             }
 
-            // 底部玻璃 Dock
+            // 底部 Dock 已上移到 v1.6.0 的五 Tab 宿主（RootTabHost）。
             //
-            // 必须用 Box + align 贴底，不能只靠 padding(bottom)。
-            // 覆盖层的根节点实际是一个「按内容包裹」的坐标空间：
-            // 直接放一个 Row 进来，它会被排在 **顶部**，padding(bottom) 只是
-            // 在它下面撑出一段空白，看上去就是「底栏飞到了状态栏下面」
-            // （v1.3.3 真机截图）。
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.BottomCenter)
-            ) {
-                LibraryTabBar(
-                    bottomInset = bottomInset,
-                    selected = state.listFilter,
-                    onSelect = { vm.setFilter(it) },
-                    onPickFile = { pickFile.launch(arrayOf("application/pdf")) },
-                    onPickTree = { pickTree.launch(null) },
-                    onRescan = { vm.scan() }
-                )
-            }
+            // 原来这里是「全部/最近/导入/加密/目录」五项，同时承担了
+            // 「切筛选」和「切页面」两种语义 —— 点「导入」既不筛选也不换页，
+            // 而是弹系统选择器，混在一排 Tab 里很别扭。
+            // 现在：
+            //   · 筛选继续由上方那排胶囊负责（原本就有，语义更清楚）
+            //   · 「导入」移进「发现」页，与合并/拆分等工具归为一类
+            //   · 底栏是真正的五 Tab，不随页面变化
 
             // 长按浮框
             longPressed?.let { item ->
@@ -406,7 +387,7 @@ fun PdfListPage(
                     fileName = item.displayName,
                     error = state.passwordError,
                     onSubmit = { pwd ->
-                        vm.submitPassword(pwd) { it2, _ -> onOpenReader(it2.uri, it2.displayName) }
+                        vm.submitPassword(pwd) { it2, _ -> onOpenReader(it2.uri, it2.displayName, it2.lastModified) }
                     },
                     onDismiss = vm::dismissPassword
                 )
@@ -608,53 +589,6 @@ private fun SearchField(value: String, onValueChange: (String) -> Unit, onClose:
     }
 }
 
-// ---------------------------------------------------------------------------
-// 底部玻璃 Dock
-// ---------------------------------------------------------------------------
-
-@Composable
-private fun LibraryTabBar(
-    bottomInset: Dp,
-    selected: ListFilter,
-    onSelect: (ListFilter) -> Unit,
-    onPickFile: () -> Unit,
-    onPickTree: () -> Unit,
-    onRescan: () -> Unit
-) {
-    val colors = LocalColors.current
-    val scope = rememberCoroutineScope()
-
-    // 五项：全部 / 最近 / ＋（导入）/ 加密 / 目录
-    // 中间「＋」是主操作，做成独立实心胶囊 —— 与参考图一致。
-    val tabs = remember {
-        listOf(
-            GlassTab(LIcon.Folder, "全部"),
-            GlassTab(LIcon.List, "最近"),
-            GlassTab(LIcon.Plus, "导入", primary = true),
-            GlassTab(LIcon.Lock, "加密"),
-            GlassTab(LIcon.PageGrid, "目录")
-        )
-    }
-    val filters = remember {
-        listOf(ListFilter.ALL, ListFilter.RECENT, null, ListFilter.ENCRYPTED, ListFilter.SAF)
-    }
-    val selectedIndex = filters.indexOf(selected).let { if (it < 0) 0 else it }
-
-    Column(Modifier.fillMaxWidth()) {
-        GlassTabBar(
-            items = tabs,
-            selectedIndex = selectedIndex,
-            onSelect = { i ->
-                when (val f = filters[i]) {
-                    null -> onPickFile()
-                    else -> onSelect(f)
-                }
-            },
-            modifier = Modifier.padding(horizontal = LSpace.pageHorizontal)
-        )
-        Spacer(Modifier.height(bottomInset + 12.dp))
-    }
-}
 
 
 

@@ -76,7 +76,8 @@ import kotlinx.coroutines.launch
 fun SettingsPage(
     container: AppContainer,
     settings: AppSettings,
-    onBack: () -> Unit
+    /** 独立打开时显示返回按钮；作为「我的」Tab 内嵌时为 null */
+    onBack: (() -> Unit)? = null
 ) {
     val colors = LocalColors.current
     val scope = rememberCoroutineScope()
@@ -111,16 +112,25 @@ fun SettingsPage(
         // 内容层：标题 + 分组列表（被玻璃采样）
         content = {
         Column(Modifier.fillMaxSize()) {
-            Spacer(Modifier.height(WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 12.dp))
+            // v1.6.0：作为「我的」Tab 内嵌时不该出现返回按钮 —— Tab 页没有「上一页」。
+            // 但状态栏留白两种形态都要加：Tab 宿主只负责底栏，不替内容处理状态栏
+            Spacer(
+                Modifier.height(
+                    WindowInsets.statusBars.asPaddingValues().calculateTopPadding() +
+                        if (onBack == null) 8.dp else 12.dp
+                )
+            )
             Row(
                 Modifier
                     .fillMaxWidth()
                     .padding(horizontal = LSpace.pageHorizontal),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                GlassIconButton(LIcon.ChevronLeft, "返回", onBack, size = 40.dp)
-                Spacer(Modifier.width(12.dp))
-                Text("设置", style = LType.TitleL, color = colors.text)
+                if (onBack != null) {
+                    GlassIconButton(LIcon.ChevronLeft, "返回", onBack, size = 40.dp)
+                    Spacer(Modifier.width(12.dp))
+                }
+                Text(if (onBack == null) "我的" else "设置", style = LType.TitleL, color = colors.text)
             }
             Spacer(Modifier.height(10.dp))
 
@@ -128,7 +138,7 @@ fun SettingsPage(
                 contentPadding = PaddingValues(
                     start = LSpace.pageHorizontal,
                     end = LSpace.pageHorizontal,
-                    bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 32.dp
+                    bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 120.dp
                 ),
                 verticalArrangement = Arrangement.spacedBy(22.dp),
                 modifier = Modifier.fillMaxSize()

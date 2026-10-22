@@ -115,6 +115,13 @@ fun PdfReaderPage(
     settings: AppSettings,
     uri: String,
     displayName: String,
+    /** 指定起始页（0 基）。-1 = 按上次阅读进度（v1.6.0，供书签跳转） */
+    startPage: Int = -1,
+    /**
+     * 文件修改时间（毫秒）。存储键 = hash(uri|mtime)，标注/书签/进度全按此键存盘。
+     * 传 0 会算出另一套键，表现为「标注画了重开就没了」——所以必须由导航参数带过来。
+     */
+    lastModified: Long = 0L,
     onClose: () -> Unit
 ) {
     val vm = rememberReaderViewModel(container)
@@ -124,8 +131,8 @@ fun PdfReaderPage(
     val scope = rememberCoroutineScope()
 
     // 绑定文档（uri + mtime 由导航参数给出，缺失时用 0 仍可读）
-    LaunchedEffect(uri) {
-        vm.bind(uri, displayName, 0L, null)
+    LaunchedEffect(uri, lastModified, startPage) {
+        vm.bind(uri, displayName, lastModified, null, startPage)
         vm.setZoomLimit(settings.zoomLimit.toFloat())
     }
 

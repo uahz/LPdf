@@ -236,16 +236,42 @@ fun PdfToolsPage(
     var file by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<File?>(null) }
     var error by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
 
-    androidx.compose.runtime.LaunchedEffect(uri) {
-        val direct = File(uri.removePrefix("file://"))
+    // 从「发现」页进来时没有指定文件（uri 为空）：先让用户挑一个。
+    // 以前这里直接 stageCopy(Uri.parse(""))，必然失败并停在
+    // 「暂存文件失败」—— 等于发现页那五个入口全是死的。
+    val needPick = uri.isBlank()
+    var pickUri by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf<Uri?>(null)
+    }
+    val pickFile = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { picked ->
+        if (picked == null) {
+            onBack()
+        } else {
+            error = null
+            pickUri = picked
+        }
+    }
+
+    androidx.compose.runtime.LaunchedEffect(needPick, pickUri) {
+        val src = when {
+            pickUri != null -> pickUri.toString()
+            needPick -> return@LaunchedEffect
+            else -> uri
+        }
+        val direct = File(src.removePrefix("file://"))
         if (direct.exists() && direct.canRead()) {
             file = direct
         } else {
             val res = PdfWriterEngine.stageCopy(
                 container.resolver(),
-                Uri.parse(uri),
+                Uri.parse(src),
                 container.appContext().cacheDir,
-                displayName.ifBlank { "document.pdf" }
+                displayName.ifBlank {
+                    // 从发现页选的文件拿不到 displayName，从 uri 末段猜一个
+                    pickUri?.lastPathSegment?.substringAfterLast('/') ?: "document.pdf"
+                }
             )
             when (res) {
                 is com.lpdf.reader.core.model.PdfResult.Success -> file = res.value
@@ -253,12 +279,60 @@ fun PdfToolsPage(
             }
         }
     }
+
+    if (needPick && pickUri == null) {
+        ToolPickFile(onBack = onBack, onPick = { pickFile.launch(arrayOf("application/pdf")) })
+        return
+    }
+
     val f = file
     if (f == null) {
         ToolPreparing(error)
         return
     }
     PdfToolsContent(container, f, displayName, pageCount, onBack)
+}
+
+/** 从「发现」页进入且还没选文件时的引导页 */
+@Composable
+private fun ToolPickFile(onBack: () -> Unit, onPick: () -> Unit) {
+    val colors = LocalColors.current
+    LiquidGlassScope(
+        modifier = Modifier.background(colors.pageBg),
+        content = {
+            Column(Modifier.fillMaxSize()) {
+                Spacer(
+                    Modifier.height(
+                        WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 12.dp
+                    )
+                )
+                Row(
+                    Modifier.padding(horizontal = LSpace.pageHorizontal),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    GlassIconButton(LIcon.ChevronLeft, "返回", onBack, size = 40.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Text("工具箱", style = LType.TitleL, color = colors.text)
+                }
+            }
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(horizontal = LSpace.pageHorizontal)
+                ) {
+                    Text("先选一份 PDF", style = LType.TitleM, color = colors.text)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "合并、拆分、压缩、水印、签名都从这里开始",
+                        style = LType.Caption,
+                        color = colors.secondary
+                    )
+                    Spacer(Modifier.height(18.dp))
+                    GlassPillButton("选择文件", onPick)
+                }
+            }
+        }
+    )
 }
 
 @Composable
