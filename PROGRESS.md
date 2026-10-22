@@ -491,9 +491,10 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 | v1.7.0 | ✅ | ✅ 2026-10-22 补传 |
 | v1.7.1 | ✅ 签名包 `app-release.apk` | ✅ |
 | v1.7.2 | ✅ 签名包 `app-release.apk` | ✅ |
-| **v1.7.3** | ✅ 签名包 `app-release.apk` | ✅ `file_id = eQwUNShlnGmq` |
+| v1.7.3 | ✅ 签名包 `app-release.apk` | ✅ `file_id = eQwUNShlnGmq` |
+| **v1.7.4** | ✅ 签名包 `app-release.apk` | ✅ `file_id = eSJoxJzuZYKU` |
 
-> 网盘 `LPdf` 目录现含 1.2.0 ~ 1.7.3 共 15 个 APK。
+> 网盘 `LPdf` 目录现含 1.2.0 ~ 1.7.4 共 16 个 APK。
 
 > 发版时发现 GitHub 仓库**从未配置过签名 secrets**，CI 一直产出的是未签名的
 > `app-release-unsigned.apk` —— 用户下载后无法安装。本次已补配
