@@ -16,6 +16,7 @@
 | 单测数量 | **206 项，全绿** |
 | Lint | **0 error / 11 warning**（已进 CI，`abortOnError = true`） |
 | APK 体积 | **22.3 MB**（v1.7.0 为 29.6 MB，减 23.5%） |
+| CI 签名 | ✅ 已配置 4 个 secrets，CI 产物为签名包 |
 | 源码规模 | 61 个 Kotlin 文件 / 15777 行 |
 | 测试文件 | 31 个 |
 | 签名 | RSA 4096，SHA-256 `1590d022…`，自 1.1.0 未变，可跨版本覆盖升级 |
@@ -240,7 +241,14 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 | v1.5.1 / v1.5.2 | ✅ | ⬜ 待补传 |
 | v1.6.0 / v1.6.1 | ✅ | ⬜ 待补传 |
 | v1.7.0 | ✅ | ⬜ 待补传 |
-| v1.7.1 | ✅ | ✅ 本次上传 |
+| v1.7.1 | ✅ 签名包 `app-release.apk` | ✅ 本次上传 |
+
+> 发版时发现 GitHub 仓库**从未配置过签名 secrets**，CI 一直产出的是未签名的
+> `app-release-unsigned.apk` —— 用户下载后无法安装。本次已补配
+> `KEYSTORE_BASE64` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` 四个 secret，
+> 重跑 CI 后拿到签名包，并删掉了 Release 上的未签名资产。
+> **此前的 v1.6.0 ~ v1.7.0 的 CI 产物同样是未签名的**，那些版本请以网盘 / 本地 `releases/`
+> 目录里的 APK 为准。
 
 ---
 
