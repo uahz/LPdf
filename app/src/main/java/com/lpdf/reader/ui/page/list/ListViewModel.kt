@@ -248,14 +248,15 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
      *
      * 手动导入的文件读取权限是 takePersistableUriPermission 给的长期授权，
      * 重启后 uri 仍然可读；若授权被系统回收或文件被删，返回 null（不显示假条目）。
+     * 全部 IO 在 Dispatchers.IO 上做 —— 调用方有主线程 collector（v1.8.2 排查）。
      */
-    private fun buildPinnedItem(uri: String): PdfItem? {
-        val parsed = runCatching { Uri.parse(uri) }.getOrNull() ?: return null
+    private suspend fun buildPinnedItem(uri: String): PdfItem? = withContext(AppDispatchers.io) {
+        val parsed = runCatching { Uri.parse(uri) }.getOrNull() ?: return@withContext null
         val readable = runCatching {
             container.resolver().openInputStream(parsed)?.use { it.read() != -1 } == true
         }.getOrDefault(false)
-        if (!readable) return null
-        return PdfItem(
+        if (!readable) return@withContext null
+        PdfItem(
             id = uri,
             uri = uri,
             displayName = container.mediaStore.displayNameOf(parsed) ?: "导入文档.pdf",

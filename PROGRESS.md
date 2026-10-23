@@ -1,7 +1,7 @@
 # LPdf 开发进度
 
-> 更新时间：2026-10-23 14:40
-> 当前版本：**v1.8.2**（versionCode 182）
+> 更新时间：2026-10-23 16:20
+> 当前版本：**v1.8.3**（versionCode 183）
 > 仓库：https://github.com/uahz/LPdf
 
 ---
@@ -10,9 +10,9 @@
 
 | 指标 | 数值 |
 | --- | --- |
-| 当前版本 | v1.8.2 |
-| versionCode | 182 |
-| 最近发布 | [v1.8.2](https://github.com/uahz/LPdf/releases/tag/v1.8.2)（2026-10-23） |
+| 当前版本 | v1.8.3 |
+| versionCode | 183 |
+| 最近发布 | [v1.8.3](https://github.com/uahz/LPdf/releases/tag/v1.8.3)（2026-10-23） |
 | 单测数量 | **251 项** |
 | Lint | **0 error / 11 warning**（已进 CI，`abortOnError = true`） |
 | APK 体积 | **24.01 MB**（25,175,495 字节，含 PDFBox） |
