@@ -8,6 +8,7 @@ navigation = "2.8.9"
 datastore = "1.1.4"
 coroutines = "1.9.0"
 pdfium = "1.0.32"
+pdfboxAndroid = "2.0.27.0"
 okhttp = "4.12.0"
 junit = "4.13.2"
 robolectric = "4.14.1"
@@ -37,6 +38,7 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
 
 pdfium-android = { group = "io.legere", name = "pdfiumandroid", version.ref = "pdfium" }
+pdfbox-android = { group = "com.tom-roush", name = "pdfbox-android", version.ref = "pdfboxAndroid" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 liquid-glass = { group = "com.github.Kyant0", name = "AndroidLiquidGlass", version = "1.0.0-rc01" }
 

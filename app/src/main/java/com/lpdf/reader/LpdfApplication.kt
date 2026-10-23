@@ -32,6 +32,11 @@ class LpdfApplication : Application() {
         runCatching { CrashReporter.install(this) }
 
         PdfiumEngine.init(this)
+        // PDFBox 的字体 / cmap 资源打包在 assets 里，必须先把 assets 目录告诉它，
+        // 否则第一次加载字体会抛 IOException —— 表现为「元数据读出来了，一保存就崩」。
+        // 与 PdfiumEngine.init 一样属于一次性初始化，失败会让所有写出功能失效，所以要留痕。
+        runCatching { com.tom_roush.pdfbox.android.PDFBoxResourceLoader.init(this) }
+            .onFailure { CrashReporter.log("PDFBoxResourceLoader.init 失败", it) }
         container = AppContainer(this)
 
         // 启动清理属于「锦上添花」，绝不能因为它挂掉整个应用：

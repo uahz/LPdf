@@ -185,8 +185,18 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     implementation(libs.pdfium.android)
-    // 不引入 PDFBox：全项目零使用，但会往 APK 里塞 4.4 MB（主要是 fontbox 的 112 个 cmap 资源）。
-    // 需要「改写 PDF 对象 / 元数据」时再引，且优先评估 pdfium 是否已够用。
+    // PDFBox 自 v1.8.0 起重新引入，承担一切「对象级改写」（元数据、页面操作、后续工具箱）。
+    // v1.7.1 曾整体删除，当时量到 -7.26 MB；其中约 4 MB 其实来自传递依赖 BouncyCastle
+    // 的抗量子密码参数表（SIKE / PICNIC），我们完全用不上 —— 所以下面必须 exclude。
+    // 只做读写对象 / 页面操作时不需要 BC；加密与签名（v1.11.0）再单独引入，且优先只引 bcprov。
+    //
+    // pdfium 与 PDFBox 的分工（见 PROGRESS.md 附录 A.7）：
+    //   pdfium  → 渲染、取尺寸、取文本、取书签（只读链路）
+    //   PDFBox  → 对象改写，落盘只走 PDDocument.save()
+    // 反例：PDFBox 改完再让 pdfium saveAsCopy，会把内存里的旧快照整体写出、覆盖改动。
+    implementation(libs.pdfbox.android) {
+        exclude(group = "org.bouncycastle")
+    }
     implementation(libs.okhttp)
     implementation(libs.androidx.documentfile)
     implementation(libs.liquid.glass)

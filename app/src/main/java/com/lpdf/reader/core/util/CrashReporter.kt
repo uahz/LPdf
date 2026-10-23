@@ -104,6 +104,17 @@ object CrashReporter {
     fun nowStamp(): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
 
+    /**
+     * 记录一次**非致命**的初始化失败。
+     *
+     * 用于「失败了也得让应用跑下去，但必须能查到」的场景（如 PDFBox 资源加载失败）。
+     * 只写日志，不弹窗、不改全局状态 —— 真正致命的错误仍应让它自然崩溃，
+     * 由默认处理器生成完整报告，这样堆栈不会被这里截断。
+     */
+    fun log(tag: String, error: Throwable) {
+        android.util.Log.e("LPdf", "$tag: ${error.stackTraceToString()}")
+    }
+
     /** 把界面层异常格式化成与崩溃日志同构的文本，便于用户一次复制完整 */
     fun formatUiError(error: Throwable): String = buildString {
         appendLine("===== LPdf 界面异常 =====")
