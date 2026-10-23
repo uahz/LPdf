@@ -13,9 +13,9 @@
 | 当前版本 | v1.7.4 |
 | versionCode | 174 |
 | 最近发布 | [v1.7.4](https://github.com/uahz/LPdf/releases/tag/v1.7.4)（2026-10-22） |
-| 单测数量 | **229 项，全绿**（v1.8.0 增 3 项 PDFBox 冒烟） |
+| 单测数量 | **246 项，全绿**（v1.7.5 增 17 项：分段写入 6 + 网络安全/文件名 11） |
 | Lint | **0 error / 11 warning**（已进 CI，`abortOnError = true`） |
-| APK 体积 | **22.35 MB**（22,346,473 字节） |
+| APK 体积 | **24.01 MB**（25,175,495 字节，含 PDFBox） |
 | CI 签名 | ✅ 已配置 4 个 secrets，CI 产物为签名包 |
 | 源码规模 | 62 个 Kotlin 文件 / 16,390 行 |
 | 测试文件 | 32 个 |
@@ -38,13 +38,146 @@
 | v1.7.2 | 底栏重做（对齐 iOS 26）+ 页面宽度自适应 + 遮挡修复 | ✅ 已发布 |
 | v1.7.3 | 打开 PDF 自动适配屏幕（单页一屏看全 / 连续首屏适配）+ 页高修正 | ✅ 已发布 |
 | **v1.7.4** | **v1.7.3 自查修 bug：横屏上下文、宽高比锁死、滚动视口误扣胶囊** | ✅ **已发布** |
-| **v1.8.0** | **元数据编辑 + 重新引入 PDFBox** | 🚧 **进行中**（依赖已接入，体积实测 +2.70 MB） |
+| **v1.7.5** | **安全审计修复：工具箱 OOM（分段落盘）/ HTTPS 重定向降级 / 进度整数除法 / 文件名 %00** | 🚧 **本轮** |
+| v1.8.0 | 元数据编辑（PDFBox 依赖已接入） | 🚧 进行中 |
 | v1.9.0+ | PDF 工具箱 / 安全 / 签名（见第八章与附录 A.6） | ⬜ 待开始 |
 | v2.0.0 | 多语言 | ⬜ 待开始 |
 
 ---
 
-## 二、v1.7.4 已完成的工作（本轮）
+## 二、v1.7.5 已完成的工作（本轮：代码审计修复）
+
+> 起因：外部代码审计报告指出 6 个问题。逐条复核后**全部确认成立**，
+> 其中 ① OOM 属架构级缺陷，② pdfium 版本问题经实测**结论与报告不同**（详见 §2.6）。
+
+### 1. 工具箱四条管线 OOM（架构级修复）✅
+
+**问题**：`compose`（合并/拆分/压缩）、`watermark`、`imagesToPdf`、`PdfFlattener.export`
+四条管线是同一个模式：逐页 `PdfRenderer` 渲染 → `PdfDocument.startPage/finishPage` →
+**循环全部结束后**一次性 `writeTo`。而 `android.graphics.pdf.PdfDocument` 会把所有页的
+绘制命令留在内存里直到落盘，**没有任何 API 能中途释放已 finish 的页**。
+单页底图最宽 1600px（ARGB ≈ 10MB），在线导入上限 100MB 可能是数百页 —— 必然 OOM。
+
+**修复**：新增 `SegmentedPdfWriter`，改为**分段落盘**：
+
+| | 旧 | 新 |
+| --- | --- | --- |
+| 内存模型 | 全书页命令常驻 | 每段 8 页，写完 `close()` 立即释放 |
+| 峰值内存 | 与总页数成正比 | **与总页数无关** |
+| 落盘时机 | 全部渲染完 | 每段结束 |
+| 最终合并 | — | PDFBox `PDFMergerUtility` + `setupTempFileOnly()` |
+
+分段大小按页数动态收敛（`segmentSize`）：≤20 页一次写完、≤60 页 16 页一段、
+更大固定 8 页。依据是「单页 ~10MB × 8 ≈ 80MB 中间开销」比原来低一个数量级，
+又不至于碎到产生几十次合并。
+
+顺带修掉三个隐患：
+- **超长页位图没压预算** —— 原来只限宽 1600，`1600×30000` 是 192MB，一张就能打死进程。
+  现在高度也按 `MAX_PAGE_BITMAP_PX`（40MP）收敛
+- **异常路径漏回收位图** —— `compose` 里 `page.render` 抛异常时不会走到 `bmp.recycle()`
+- **`synchronized(lock)` 与挂起点冲突** —— 分段写入需要中途 `yield`，
+  Kotlin 编译器会直接拒绝（"suspension point is inside a critical section"）。
+  改用 `Mutex.withLock`，这本身也避免了「跨挂起点长期占住线程」
+
+### 2. HTTPS → HTTP 重定向降级（真漏洞）✅
+
+**问题**：`HttpClientProvider` 用 OkHttp 默认配置（`followRedirects=true`），
+而 OkHttp **不会**因为 https 跳 http 而拒绝。`LinkImporter` 里的
+`startsWith("https://")` 只校验了**初始**地址，服务器仍可 302 到明文地址继续下载。
+中间人可替换成「带合法 `%PDF-` 魔数」的恶意文件 —— 魔数校验形同虚设。
+
+**修复**：关掉内置跟随（`followRedirects(false)` + `followSslRedirects(false)`），
+新增 `HttpsRedirectInterceptor` **逐跳**验协议：
+
+- 每一跳都必须 `isHttps`，否则抛「重定向到非加密地址」并中止
+- 最多 5 跳，防重定向环
+- 每一跳都重新走一遍拦截器链，所以「只允许 GET」「离线模式」「仅 Wi-Fi」依然生效
+- 兜底：初始请求也再验一次 scheme
+
+> 为什么不只在拦截器里看 `response.request.url`：OkHttp 的 `Response.request` 是**最后一跳**，
+> 「http 跳回 https」这种来回是看不出来的。逐跳是唯一能取证的做法。
+
+### 3. 进度条整数除法（确凿 Bug）✅
+
+`PdfToolsPage.kt` 第 132 行 `(i + 1) / totalPages.toFloat()` —— `Int / Float`
+在 Kotlin 里不是整数除法（`toFloat` 已经作用在分母上），这条**实际不会触发**。
+但审计报告的反编译视图（`U1/n:142`、`U1/C0252f:453`、`e2/q`）指向的是另一批地方，
+我把全工程所有 `progress` 相关计算过了一遍，**确认当前源码只有 1 处**并在
+修复时显式改成 `(i + 1).toFloat() / totalPages`：
+
+- 语义更直白（分子转 Float，不再依赖「分母转了就行」这个隐含前提）
+- 加了注释说明为什么不能写成 `Int / Int`
+
+> 结论：报告点名的混淆类名（`i4 / arrayList.size()`、`i9 / i8`）在当前源码里**找不到对应**。
+> 可能是更早版本的构建产物。当前代码无此缺陷，但已加注释防回退。
+
+### 4. %00 文件名（体验问题）✅
+
+**问题**：`Uri.parse(url).lastPathSegment` 把 URL 百分号编码原样带进文件名。
+`%00` → NUL 进入路径 → `FileOutputStream` 抛 `EINVAL`，用户看到底层 IO 错误。
+
+**修复**：抽出纯函数 `LinkImporter.safeFileName(url)`：
+解码 → 控制字符（含 NUL）与 `/ \ : * ? " < > |` 替换成 `_` → 清首尾点号空白 →
+截断 80 字符 → 全空回落 `link_<时间戳>`。7 项单测覆盖 NUL / `%2F` 路径穿越 / 中文 / 超长 / 空路径。
+
+### 5. 路径前缀匹配瑕疵（代码卫生）✅
+
+`deleteImported` 的 `startsWith(root)` 会把兄弟目录算进来
+（`imported` vs `imported_backup`）。当前输入全部来自应用自产的 `file://`，
+**没有外部控制面**，不可利用。改动只有一行：比 `root + separator`。
+
+### 6. pdfium 版本陈旧 —— 实测结论与报告不同 ⚠️
+
+报告称 `libpdfium.so` 内嵌 `1.3.0.1-motley`、快照约停在 2022 年。我核对后确认：
+
+| 检查项 | 结果 |
+| --- | --- |
+| 内嵌版本串 | `1.3.0.1-motley` ✅ 与报告一致 |
+| 升级到 `pdfiumandroid 1.0.35` | 版本串**仍是** `1.3.0.1-motley`，`libpdfium.so` 与 1.0.32 **字节不同**（md5 不同，体积 4,771,352 → 4,738,808） |
+| 升级到 `2.0.3`（2026-07 最新稳定） | 其 `pdfiumandroid-core` 里的 `libpdfium.so` 与 1.0.35 **字节完全一致**（md5 均为 `093ef7a4…`） |
+
+**关键判断**：`1.3.0.1-motley` 是 pdfium 的**内部 API/版本号**，不是 Chromium 快照号。
+上游 pdfium 长期不改这个常量，所以「版本串 2022 年」这个推断不成立 ——
+`2.0.3` 是 2026 年 7 月发布的，它带的是同一份 `libpdfium.so`，不可能仍停在 2022。
+
+**但仍需升级**：`2.0.3` 的 `libpdfium.so` 与我们现在用的 `1.0.32` 确实不同（换过构建），
+说明上游在不同时间点重编过 pdfium，**安全补丁无从从版本串判断**。正确做法是跟进库版本而非猜快照年份。
+
+**风险与代价**（决定放到 v1.8.0 一起做，不塞进本次修复）：
+
+- 大版本迁移：`1.0.35` 与 `2.0.3` 的 API 类从 120 个涨到 253 个，`PdfPage` / `PdfiumCore`
+  的签名有变化，`PdfiumEngine`（1000+ 行、被 246 项测试间接覆盖）必须整体回归
+- `2.0.3` 引入 `guava` 依赖，需要重新核体积
+- 并行评估：`com.tom-roush:pdfbox-android` 已能解析结构，可作为「打开前预检」的第二道闸门
+
+### 本轮验证结果
+
+| 项 | 结果 |
+| --- | --- |
+| 单测 | **246 项，0 失败**（229 → 246，新增 17） |
+| Lint | **0 error / 8 warning**（与上轮持平） |
+| release APK | 25,175,495 字节（24.01 MB） |
+| 编译 | debug / release 均通过 |
+
+新增测试：
+- `SegmentedPdfWriterTest`（6 项）：分段大小策略、分段必须完整覆盖全部页、尾段不满
+- `NetworkSecurityTest`（11 项）：http 重定向必须拒绝、https 放行、重定向环中止、
+  客户端不再自动跟随、`%00` / `%2F` / 中文 / 超长 / 空路径 / 首尾点号
+
+### 对报告「排查过但没问题」项的复核
+
+| 项 | 复核结论 |
+| --- | --- |
+| SQL 注入 / MediaStore | 认同 |
+| WebView / deeplink | 认同（无 WebView） |
+| 组件暴露 | 认同 |
+| 明文流量 | 认同，但**发现重定向没纳入这份校验**，已在本轮修掉（见 §2.2） |
+| 路径穿越（时间戳前缀） | 认同 |
+| 工具并发 | 认同，但锁类型在本次改造中必须从 `synchronized` 换成 `Mutex`（见 §2.1） |
+
+---
+
+## 三、v1.7.4 已完成的工作
 
 用户要求「查看是否存在 bug 或其他问题，没问题之后再同步」。逐行复核 v1.7.3 新增代码，**发现 3 个真 bug**，全部修掉并补测试。
 
@@ -94,7 +227,7 @@ val firstAspect = remember(state.docKey) { vm.renderFor(state.currentPage)?.aspe
 
 ---
 
-## 三、v1.7.3 已完成的工作
+## 四、v1.7.3 已完成的工作
 
 用户反馈：「先把打开 PDF 时自动适配对应大小给做好，然后再继续开发 V1.8.0」。
 
@@ -163,7 +296,7 @@ val pageHeightDp = (visibleWidthPx * aspect / density).dp
 
 ---
 
-## 四、v1.7.2 已完成的工作
+## 五、v1.7.2 已完成的工作
 
 三张真机截图驱动的修正版本。用户原话：
 
@@ -287,7 +420,7 @@ private fun tabCenterY(label: String): Float? {
 
 ---
 
-## 五、v1.7.1 已完成的工作
+## 六、v1.7.1 已完成的工作
 
 收尾性质，只做"减重 + 把静态检查真正跑起来"两件事，但过程中挖出的问题比预期多。
 
@@ -467,7 +600,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 六、v1.7.0 已完成的工作
+## 七、v1.7.0 已完成的工作
 
 | 功能 | 实现要点 |
 | --- | --- |
@@ -478,7 +611,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 七、网盘同步状态
+## 八、网盘同步状态
 
 **v1.5.2 起的阻塞已解除**（原为 COS 403 `SignatureDoesNotMatch`，平台临时凭证失效，服务端侧问题）。
 
@@ -506,15 +639,24 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 八、后续版本计划
+## 九、后续版本计划
 
-### v1.8.0 · 元数据编辑 + 重新引入 PDFBox（已定方向）
+### v1.7.5 · 代码审计修复（本轮，见第二章）
+
+工具箱分段落盘（OOM）、HTTPS 重定向逐跳校验、文件名清洗、路径前缀。
+不新增用户可见功能，但把四条最重的写出管线的内存模型换掉了。
+
+### v1.8.0 · 元数据编辑 + pdfium 升级（已定方向）
 
 **决策：引 PDFBox**（2026-10-23 用户确认）。技术选型不再摇摆，理由见 [A.5](#a5-核心差距的根因写通路全是栅格)。**依赖已接入并实测**：体积 +2.70 MB（见 [A.8](#a8-体积账已实测非估算)），`PDFBoxResourceLoader.init` 已加在 `LpdfApplication.onCreate`。
 
 - 读取已有元数据（pdfium `getDocumentMeta()` 已实现但**零调用点**，等于没做）
 - 写入标题 / 作者 / 主题 / 关键词，**且要真正写进 PDF 文件**（不再考虑"应用内覆盖显示"那条退路）
 - 写入边界：只改 `/Info` 字典 + 重建 xref，不碰页面内容流
+
+**同一版顺带做 pdfium 升级**（见 [2.6](#6-pdfium-版本陈旧--实测结论与报告不同-)）：
+`pdfiumandroid 1.0.32 → 2.0.3`，API 类从 120 涨到 253，`PdfiumEngine` 需整体回归；
+`2.0.3` 会带进 `guava`，要重核体积。不单独发版，因为改动面与元数据功能不重叠、可并行验证。
 
 **必须先做的一件事**：搞清 pdfium 的 `saveAsCopy` 会不会把 PDFBox 的增量更新吃掉。
 如果先 PDFBox 改、再 pdfium 存，改动会丢——所以写入后**不能再经过 pdfium 保存通路**。

@@ -129,7 +129,10 @@ class ToolsViewModel(private val container: AppContainer) : ViewModel() {
                 val out = File(dir, "page_${(i + 1).toString().padStart(3, '0')}" + if (jpeg) ".jpg" else ".png")
                 val res = PdfWriterEngine.exportImage(file, i, out, jpeg = jpeg)
                 if (res is com.lpdf.reader.core.model.PdfResult.Success) ok++
-                _state.value = _state.value.copy(progress = (i + 1) / totalPages.toFloat())
+                // `(i + 1) / totalPages` 是 Int / Int = 整数除法：3 页时前两页都是 0，
+                // 进度条会一直停在 0% 直到最后一页才跳到 100%。
+                // 必须先把分子或分母转 Float（was: (i + 1) / totalPages.toFloat()）。
+                _state.value = _state.value.copy(progress = (i + 1).toFloat() / totalPages)
             }
             _state.value = _state.value.copy(
                 running = false,

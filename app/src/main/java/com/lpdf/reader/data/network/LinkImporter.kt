@@ -39,10 +39,7 @@ class LinkImporter(
             return@withContext PdfResult.Failure(PdfError.Network("已在设置中关闭在线链接"))
         }
 
-        val name = Uri.parse(trimmed).lastPathSegment
-            ?.substringAfterLast('/')
-            ?.ifBlank { "link_${System.currentTimeMillis()}.pdf" }
-            ?: "link_${System.currentTimeMillis()}.pdf"
+        val name = safeFileName(trimmed)
         val safeName = if (name.lowercase().endsWith(".pdf")) name else "$name.pdf"
 
         // 「仅 Wi-Fi 下载」（v1.6.1 接线）：开关在设置页里存在了很久，
@@ -145,12 +142,61 @@ class LinkImporter(
         val root = File(context.filesDir, "imported").canonicalPath
         val f = runCatching { File(Uri.parse(uri).path ?: return@withContext) }.getOrNull()
             ?: return@withContext
-        runCatching { if (f.canonicalPath.startsWith(root)) f.delete() }
+        // 注意：这里必须用 `root + separator` 再比。
+        // 直接 startsWith(root) 会把兄弟目录也算进来：
+        //   root = /data/.../files/imported
+        //   路径 = /data/.../files/imported_backup/x.pdf  ← 前缀相同，但不是子文件
+        // 当前输入的 uri 全部来自应用自产的 file://（listImported 扫出来的），
+        // 没有外部控制面，所以只是代码卫生问题；但改动只有一行，没理由留着。
+        val rootPrefix = root.trimEnd(File.separatorChar) + File.separatorChar
+        runCatching {
+            if (f.canonicalPath.startsWith(rootPrefix)) f.delete()
+        }
         Unit
     }
 
-    private companion object {
+    internal companion object {
         const val MAX_BYTES = 100L * 1024 * 1024
+
+        /** 文件名长度上限。Android 文件名是 255 字节，含时间戳前缀与扩展名要留余量 */
+        const val MAX_NAME_LEN = 80
+
+        /**
+         * 从 URL 推导一个**一定能落到文件系统上**的文件名。
+         *
+         * 旧实现直接用 `Uri.parse(url).lastPathSegment`，把 URL 的百分号编码原样带进文件名：
+         * - `%00` → 文件名里出现 NUL，`FileOutputStream` 抛
+         *   `IOException: open failed: EINVAL`，用户看到的是底层 IO 错误
+         * - `%2F` → 变成路径分隔符，可能写到别的目录去
+         * - `/`、`:`、`*`、`?`、`"`、`<`、`>`、`|` → 部分 ROM 上直接 EINVAL
+         *
+         * 这里做三件事：解码 → 把非法字符替换成 `_` → 清洗首尾点号与空白。
+         * 全空则回落到 `link_<时间戳>.pdf`。纯函数，便于单测。
+         */
+        internal fun safeFileName(url: String): String {
+            val raw = Uri.parse(url).lastPathSegment.orEmpty()
+            val decoded = runCatching { Uri.decode(raw) }.getOrDefault(raw)
+
+            val cleaned = buildString {
+                decoded.forEach { ch ->
+                    when {
+                        // NUL 与其他控制字符
+                        ch.code < 0x20 || ch.code == 0x7F -> append('_')
+                        ch in ILLEGAL_CHARS -> append('_')
+                        else -> append(ch)
+                    }
+                }
+            }
+            // Windows/部分 FUSE 实现不接受首尾的点与空白；"." 与 ".." 更是危险
+            .trim()
+            .trim('.', ' ')
+            .take(MAX_NAME_LEN)
+
+            return cleaned.ifBlank { "link_${System.currentTimeMillis()}" }
+        }
+
+        /** 跨平台文件名非法字符。`/` 必须处理，它会把文件名拆成两级路径 */
+        private val ILLEGAL_CHARS = charArrayOf('/', '\\', ':', '*', '?', '"', '<', '>', '|')
     }
 }
 

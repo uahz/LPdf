@@ -9,6 +9,8 @@ import android.os.ParcelFileDescriptor
 import com.lpdf.reader.core.model.PdfError
 import com.lpdf.reader.core.model.PdfResult
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -24,6 +26,15 @@ import java.io.File
 object PdfWriterEngine {
 
     private val lock = Any()
+
+    /**
+     * 跨挂起点的串行锁（v1.6.2）。
+     *
+     * 工具箱的四条管线原来共用 `synchronized(lock)`；改成锁对象是因为
+     * 分段写入需要中途让出调度（`yield`），而 synchronized 里不允许挂起。
+     * 与 [lock] 并存不冲突：一个管同步段，一个管异步段。
+     */
+    private val writeMutex = Mutex()
 
     /** 单页栅格化：把源 PDF 的指定页画到目标 PdfDocument 上 */
     private fun drawPageTo(
@@ -54,6 +65,13 @@ object PdfWriterEngine {
 
     /**
      * 按顺序把多个页写入一个新 PDF。
+     *
+     * v1.6.2 起改为**分段落盘**（[SegmentedPdfWriter]）：
+     * 旧实现把全部页的绘制命令留在同一个 `PdfDocument` 里，到 `writeTo()` 才落盘，
+     * 页数一多就 OOM（100MB 的扫描件可达数百页，单页底图还有 ~10MB）。
+     * 现在每 8 页写成一个分段 PDF、随即 `close()` 释放，最后用 PDFBox 对象级合并。
+     * 峰值内存与总页数解耦。
+     *
      * @param qualityScale 0.25~1.0，用于「压缩」场景（越低体积越小）
      */
     suspend fun compose(
@@ -62,56 +80,86 @@ object PdfWriterEngine {
         qualityScale: Float = 1f,
         progress: (Float) -> Unit = {}
     ): PdfResult<File> = withContext(Dispatchers.IO) {
-        synchronized(lock) {
-            val target = android.graphics.pdf.PdfDocument()
+        // 用 runBlocking + Mutex 而不是 synchronized(lock)：
+        // 分段写入内部有挂起点（yield 让出调度、避免长渲染饿死其他任务），
+        // 而 Kotlin 禁止在 synchronized 临界区里挂起 —— 编不过是一种保护，
+        // 提醒我们临界区跨挂起点会阻塞整个线程池。
+        writeMutex.withLock {
+            if (pages.isEmpty()) {
+                return@withLock PdfResult.Failure(PdfError.Corrupted("没有可写入的页面"))
+            }
+            val tmpDir = File(outFile.absoluteFile.parentFile ?: File("."), "seg_${System.nanoTime()}")
             try {
-                pages.forEachIndexed { idx, ref ->
-                    ParcelFileDescriptor.open(ref.file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
-                        PdfRenderer(pfd).use { renderer ->
-                            if (ref.pageIndex !in 0 until renderer.pageCount) {
-                                return@forEachIndexed
-                            }
-                            renderer.openPage(ref.pageIndex).use { page ->
-                                // rotation 由目标页尺寸反映
-                                val rotated = ref.rotation % 360 != 0 && ref.rotation % 180 != 0
-                                val wPt = if (rotated) page.height else page.width
-                                val hPt = if (rotated) page.width else page.height
-                                val info = android.graphics.pdf.PdfDocument.PageInfo
-                                    .Builder(wPt, hPt, idx + 1).create()
-                                val dest = target.startPage(info)
-                                val maxW = (wPt * (2f * qualityScale)).toInt().coerceIn(120, 1600)
-                                val maxH = (maxW * hPt / wPt.toFloat()).toInt().coerceAtLeast(1)
-                                val bmp = Bitmap.createBitmap(maxW, maxH, Bitmap.Config.ARGB_8888)
-                                bmp.eraseColor(Color.WHITE)
-                                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                                val canvas: Canvas = dest.canvas
-                                if (rotated) {
-                                    canvas.save()
-                                    canvas.rotate(ref.rotation.toFloat(), wPt / 2f, hPt / 2f)
-                                }
-                                canvas.drawBitmap(
-                                    bmp, null,
-                                    android.graphics.RectF(0f, 0f, wPt.toFloat(), hPt.toFloat()),
-                                    Paint(Paint.FILTER_BITMAP_FLAG)
-                                )
-                                if (rotated) canvas.restore()
-                                target.finishPage(dest)
-                                bmp.recycle()
-                            }
-                        }
+                val res = SegmentedPdfWriter.write(
+                    totalPages = pages.size,
+                    outFile = outFile,
+                    dir = tmpDir,
+                    onPage = { idx, total ->
+                        progress((idx + 1).toFloat() / total)
                     }
-                    progress((idx + 1) / pages.size.toFloat())
+                ) { doc, index ->
+                    val ref = pages[index]
+                    drawRefTo(doc, ref, index + 1, qualityScale)
                 }
-                outFile.parentFile?.mkdirs()
-                outFile.outputStream().use { target.writeTo(it) }
-                PdfResult.Success(outFile)
-            } catch (e: Exception) {
-                PdfResult.Failure(PdfError.WriteFailed("写入 PDF 失败：${e.message}"))
+                res
             } finally {
-                target.close()
+                runCatching { tmpDir.deleteRecursively() }
             }
         }
     }
+
+    /**
+     * 把单个页绘制到目标文档（供 [compose] 与分段写入器复用）。
+     *
+     * 位图在 `finishPage` 之前回收：`PdfDocument.finishPage` 会把画布命令
+     * 序列化进内部结构，之后不再引用位图；反过来在 finish 之前 recycle 会让页面变黑。
+     */
+    private fun drawRefTo(
+        doc: android.graphics.pdf.PdfDocument,
+        ref: PageRef,
+        destPageNo: Int,
+        qualityScale: Float
+    ) {
+        ParcelFileDescriptor.open(ref.file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+            PdfRenderer(pfd).use { renderer ->
+                if (ref.pageIndex !in 0 until renderer.pageCount) return
+                renderer.openPage(ref.pageIndex).use { page ->
+                    // rotation 由目标页尺寸反映
+                    val rotated = ref.rotation % 360 != 0 && ref.rotation % 180 != 0
+                    val wPt = if (rotated) page.height else page.width
+                    val hPt = if (rotated) page.width else page.height
+                    val maxW = (wPt * (2f * qualityScale)).toInt().coerceIn(120, 1600)
+                    // 高度也得压预算：一张 1600×20000 的位图是 128MB，比页数更致命
+                    val rawH = (maxW.toFloat() * hPt / wPt.toFloat()).toInt().coerceAtLeast(1)
+                    val maxH = rawH.coerceAtMost(MAX_PAGE_BITMAP_PX / maxW)
+                    val bmp = Bitmap.createBitmap(maxW, maxH, Bitmap.Config.ARGB_8888)
+                    try {
+                        bmp.eraseColor(Color.WHITE)
+                        page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        SegmentedPdfWriter.drawBitmapPage(
+                            doc = doc,
+                            pageNo = destPageNo,
+                            widthPt = wPt,
+                            heightPt = hPt,
+                            rotation = if (rotated) ref.rotation else 0
+                        ) { canvas ->
+                            canvas.drawBitmap(
+                                bmp, null,
+                                android.graphics.RectF(0f, 0f, wPt.toFloat(), hPt.toFloat()),
+                                Paint(Paint.FILTER_BITMAP_FLAG)
+                            )
+                        }
+                    } finally {
+                        // 异常路径也要回收，否则长文档中途失败会漏掉一张几十 MB 的位图
+                        runCatching { bmp.recycle() }
+                    }
+                }
+            }
+        }
+    }
+
+    /** 单页位图像素上限（约 40MP ≈ 160MB ARGB，仍在低端机 heap 之内） */
+    private const val MAX_PAGE_BITMAP_PX = 40_000_000
 
     /**
      * 水印参数（v1.3）。
@@ -149,68 +197,81 @@ object PdfWriterEngine {
         pageRange: Set<Int>? = null,
         progress: (Float) -> Unit = {}
     ): PdfResult<File> = withContext(Dispatchers.IO) {
-        synchronized(lock) {
-            val target = android.graphics.pdf.PdfDocument()
-            var wmBitmap: Bitmap? = null
+        writeMutex.withLock {
+            val total = pageCountOf(src)
+            if (total <= 0) {
+                return@withLock PdfResult.Failure(PdfError.Corrupted("文档没有可读页面"))
+            }
+
+            // 图片水印只解码一次，全程复用（分段时也不重复解码）
+            val wmBitmap: Bitmap? =
+                if (spec.text.isBlank() && spec.imagePath != null) {
+                    runCatching { android.graphics.BitmapFactory.decodeFile(spec.imagePath) }.getOrNull()
+                } else null
+
+            val tmpDir = File(outFile.absoluteFile.parentFile ?: File("."), "seg_${System.nanoTime()}")
             try {
-                ParcelFileDescriptor.open(src, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
-                    PdfRenderer(pfd).use { renderer ->
-                        val total = renderer.pageCount
-                        if (total <= 0) return@synchronized PdfResult.Failure(PdfError.Corrupted("文档没有可读页面"))
-
-                        // 图片水印只解码一次
-                        if (spec.text.isBlank() && spec.imagePath != null) {
-                            wmBitmap = runCatching {
-                                android.graphics.BitmapFactory.decodeFile(spec.imagePath)
-                            }.getOrNull()
-                        }
-
-                        for (i in 0 until total) {
-                            renderer.openPage(i).use { page ->
-                                val wPt = page.width
-                                val hPt = page.height
-                                val info = android.graphics.pdf.PdfDocument.PageInfo
-                                    .Builder(wPt, hPt, i + 1).create()
-                                val dest = target.startPage(info)
-                                val canvas: Canvas = dest.canvas
-
-                                // 底图：按页宽 2 倍渲染，上限 1600 防 OOM
-                                val bmpW = (wPt * 2).coerceIn(160, 1600)
-                                val bmpH = (bmpW.toFloat() * hPt / wPt).toInt().coerceAtLeast(1)
-                                // render / drawBitmap 抛异常时原来不会走到 bmp.recycle()，
-                                // 长文档中途失败就漏掉一张几千像素宽的位图。
-                                val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
-                                try {
-                                    bmp.eraseColor(Color.WHITE)
-                                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                                    canvas.drawBitmap(
-                                        bmp, null,
-                                        android.graphics.RectF(0f, 0f, wPt.toFloat(), hPt.toFloat()),
-                                        Paint(Paint.FILTER_BITMAP_FLAG)
-                                    )
-                                } finally {
-                                    runCatching { bmp.recycle() }
-                                }
-
-                                // 水印：仅在指定页码范围
-                                if (pageRange == null || pageRange.contains(i)) {
-                                    drawWatermark(canvas, wPt.toFloat(), hPt.toFloat(), spec, wmBitmap)
-                                }
-
-                                target.finishPage(dest)
-                            }
-                            progress((i + 1).toFloat() / total)
-                        }
-                    }
+                SegmentedPdfWriter.write(
+                    totalPages = total,
+                    outFile = outFile,
+                    dir = tmpDir,
+                    onPage = { idx, t -> progress((idx + 1).toFloat() / t) }
+                ) { doc, i ->
+                    drawWatermarkPage(doc, src, i, spec, pageRange, wmBitmap)
                 }
-                outFile.parentFile?.mkdirs()
-                outFile.outputStream().use { target.writeTo(it) }
-                PdfResult.Success(outFile)
-            } catch (e: Exception) {
-                PdfResult.Failure(PdfError.WriteFailed("写入水印失败：${e.message}"))
             } finally {
                 runCatching { wmBitmap?.recycle() }
-                target.close()
+                runCatching { tmpDir.deleteRecursively() }
+            }
+        }
+    }
+
+    /** 渲染第 [index] 页底图并叠加水印（v1.6.2 抽出，供分段写入复用） */
+    private fun drawWatermarkPage(
+        doc: android.graphics.pdf.PdfDocument,
+        src: File,
+        index: Int,
+        spec: WatermarkSpec,
+        pageRange: Set<Int>?,
+        wmBitmap: Bitmap?
+    ) {
+        ParcelFileDescriptor.open(src, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+            PdfRenderer(pfd).use { renderer ->
+                if (index !in 0 until renderer.pageCount) return
+                renderer.openPage(index).use { page ->
+                    val wPt = page.width
+                    val hPt = page.height
+                    // 底图：按页宽 2 倍渲染，上限 1600 防 OOM
+                    val bmpW = (wPt * 2).coerceIn(160, 1600)
+                    val rawH = (bmpW.toFloat() * hPt / wPt).toInt().coerceAtLeast(1)
+                    // 超长页同样要压：1600×30000 是 192MB，一张就足以把进程打死
+                    val bmpH = rawH.coerceAtMost(MAX_PAGE_BITMAP_PX / bmpW)
+                    val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+                    try {
+                        bmp.eraseColor(Color.WHITE)
+                        page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        SegmentedPdfWriter.drawBitmapPage(
+                            doc = doc,
+                            pageNo = index + 1,
+                            widthPt = wPt,
+                            heightPt = hPt,
+                            overlay = { canvas, w, h ->
+                                // 水印只在指定页码范围
+                                if (pageRange == null || pageRange.contains(index)) {
+                                    drawWatermark(canvas, w.toFloat(), h.toFloat(), spec, wmBitmap)
+                                }
+                            }
+                        ) { canvas ->
+                            canvas.drawBitmap(
+                                bmp, null,
+                                android.graphics.RectF(0f, 0f, wPt.toFloat(), hPt.toFloat()),
+                                Paint(Paint.FILTER_BITMAP_FLAG)
+                            )
+                        }
+                    } finally {
+                        runCatching { bmp.recycle() }
+                    }
+                }
             }
         }
     }

@@ -108,14 +108,23 @@ object PdfFlattener {
             is PdfResult.Success -> sessionRes.value
         }
 
-        val pdf = PdfDocument()
+        // v1.6.2：改为分段落盘，解决整本导出 OOM。
+        // 旧实现把全书页面的绘制命令压在一个 PdfDocument 里，最后一次 writeTo ——
+        // 100MB 的扫描件（数百页、每页底图最大 1440px）必然顶到 heap 上限。
+        // 现在每 8 页（小文档会更少）写一段、随即 close 释放，最后由 PDFBox 对象级合并。
+        val tmpDir = File(outFile.absoluteFile.parentFile ?: File("."), "flat_${System.nanoTime()}")
         try {
-            for (pageIndex in 0 until pageCount) {
+            SegmentedPdfWriter.write(
+                totalPages = pageCount,
+                outFile = outFile,
+                dir = tmpDir,
+                onPage = { idx, total -> progress((idx + 1).toFloat() / total) }
+            ) { pdf, pageIndex ->
                 coroutineContext.ensureActive()
 
                 val planRes = session.plan(pageIndex, RENDER_WIDTH)
                 val plan = when (planRes) {
-                    is PdfResult.Failure -> return@withContext planRes
+                    is PdfResult.Failure -> throw planRes.error
                     is PdfResult.Success -> planRes.value
                 }
 
@@ -148,7 +157,8 @@ object PdfFlattener {
                 if (renderRes is PdfResult.Failure) lastError = renderRes.error
                 if (lastError != null) {
                     runCatching { pdf.finishPage(page) }
-                    return@withContext PdfResult.Failure(lastError)
+                    // 抛出让 SegmentedPdfWriter 走统一的错误包装，并清掉已写分段
+                    throw lastError!!
                 }
 
                 // 2) 叠加该页标注
@@ -159,21 +169,18 @@ object PdfFlattener {
                 }
 
                 pdf.finishPage(page)
-                progress((pageIndex + 1).toFloat() / pageCount)
             }
-
-            outFile.parentFile?.mkdirs()
-            outFile.outputStream().use { pdf.writeTo(it) }
-            PdfResult.Success(outFile)
         } catch (e: SecurityException) {
             PdfResult.Failure(PdfError.PermissionDenied())
+        } catch (e: PdfError) {
+            PdfResult.Failure(e)
         } catch (e: java.io.IOException) {
             PdfResult.Failure(PdfError.WriteFailed(e.message ?: "写入失败"))
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException) throw t
             PdfResult.Failure(PdfError.Unknown("导出标注失败", t))
         } finally {
-            runCatching { pdf.close() }
+            runCatching { tmpDir.deleteRecursively() }
             runCatching { session.close() }
         }
     }
