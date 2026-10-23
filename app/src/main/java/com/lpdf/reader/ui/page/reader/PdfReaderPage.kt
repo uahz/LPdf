@@ -387,18 +387,9 @@ fun PdfReaderPage(
                 )
             }
 
-            // 页码胶囊（滚动中显示）
-            AnimatedVisibility(
-                visible = state.chromeVisible && state.pageCount > 0,
-                enter = fadeIn() + scaleIn(initialScale = 0.9f),
-                exit = fadeOut() + scaleOut(targetScale = 0.9f),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 132.dp)
-            ) {
-                PagePill(page = state.currentPage + 1, total = state.pageCount)
-            }
-
+            // v1.8.5：独立的「页码胶囊」删除。
+            // 底部 Dock 主胶囊本来就有「1 / 399」，两颗半透明胶囊叠在一起
+            // 就是用户截图圈出的底部一团糊。页码只保留 Dock 里那一处。
             // 编辑工具岛（选中工具后展开）
             AnimatedVisibility(
                 visible = state.chromeVisible && state.tool != EditorTool.NONE,
@@ -1224,11 +1215,12 @@ private fun ReaderTopBar(
     onToc: () -> Unit
 ) {
     val colors = LocalColors.current
-    // v1.8.2：标题绝对居中 + 按钮放大。
+    // v1.8.5：顶栏收进一条 56dp 玻璃胶囊。
     //
-    // 旧版用两个 weight(1f) 的 Spacer 夹标题，但左右两侧按钮数量不同
-    // （右侧比左侧多一个夜间按钮），标题实际是偏的 —— 用户截图圈出来。
-    // 新版标题用 Box 居中叠放，按钮行独立排布；按钮 40 → 44dp、图标同步放大。
+    // 旧版标题和按钮直接浮在书页上（没有任何底），白页上的灰色标题
+    // 和页码、以及透出的正文文字混在一起 —— 用户截图圈出的「标题和
+    // 1 / 399 叠在一起」就是这个原因。胶囊给了玻璃一层底，
+    // 标题/页码在栏内垂直居中，互不重叠。
     Box(
         Modifier
             .fillMaxWidth()
@@ -1238,58 +1230,53 @@ private fun ReaderTopBar(
                 top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp
             )
     ) {
-        // 居中标题（绝对居中，不参与按钮行的空间分配）
-        Column(
-            Modifier.align(Alignment.Center),
-            horizontalAlignment = Alignment.CenterHorizontally
+        LiquidGlass(
+            Modifier.fillMaxWidth().height(56.dp),
+            shape = pillShape(56f)
         ) {
-            Text(
-                title,
-                style = LType.Body,
-                color = colors.text,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (subtitle.isNotEmpty()) {
-                Text(subtitle, style = LType.Micro, color = colors.secondary)
-            }
-        }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .padding(horizontal = 6.dp)
+            ) {
+                // 居中标题（绝对居中，不参与按钮行的空间分配）
+                Column(
+                    Modifier.align(Alignment.Center),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        title,
+                        style = LType.Body,
+                        color = colors.text,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (subtitle.isNotEmpty()) {
+                        Text(subtitle, style = LType.Micro, color = colors.secondary)
+                    }
+                }
 
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            GlassIconButton(LIcon.ChevronLeft, "返回", onBack, size = 44.dp)
-            Spacer(Modifier.weight(1f))
-            GlassIconButton(
-                if (night) LIcon.Sun else LIcon.Moon,
-                if (night) "切换到日间" else "夜间模式",
-                onNight,
-                size = 44.dp
-            )
-            Spacer(Modifier.width(10.dp))
-            if (hasToc) {
-                GlassIconButton(LIcon.List, "目录", onToc, size = 44.dp)
-            } else {
-                Spacer(Modifier.width(44.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    GlassIconButton(LIcon.ChevronLeft, "返回", onBack, size = 44.dp)
+                    Spacer(Modifier.weight(1f))
+                    GlassIconButton(
+                        if (night) LIcon.Sun else LIcon.Moon,
+                        if (night) "切换到日间" else "夜间模式",
+                        onNight,
+                        size = 44.dp
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    if (hasToc) {
+                        GlassIconButton(LIcon.List, "目录", onToc, size = 44.dp)
+                    } else {
+                        Spacer(Modifier.width(44.dp))
+                    }
+                }
             }
-        }
-    }
-}
-
-/** 页码胶囊：12 / 214 */
-@Composable
-private fun PagePill(page: Int, total: Int) {
-    val colors = LocalColors.current
-    LiquidGlass(Modifier.height(30.dp), shape = pillShape(30f), showHighlight = false) {
-        Row(
-            Modifier
-                .height(30.dp)
-                .padding(horizontal = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("$page", style = LType.number(12f.sp(), androidx.compose.ui.text.font.FontWeight.SemiBold), color = colors.text)
-            Text(" / $total", style = LType.Micro, color = colors.secondary)
         }
     }
 }

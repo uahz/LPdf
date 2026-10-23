@@ -405,21 +405,20 @@ private fun TabItem(
             )
         }
 
-        if (showLabel) {
-            Text(
-                item.label,
-                style = LType.Micro,
-                color = colors.accent,
-                textAlign = TextAlign.Center,
-                maxLines = 1,
-                // v1.8.4：文字槽 12dp → 14dp。Micro 行高约 13dp，
-                // 旧的 12dp 槽会把基线压出槽底，真机上就是截图里
-                // 「首页」两个字溢到栏外的样子。
-                modifier = Modifier.height(14.dp)
-            )
-        } else {
-            Spacer(Modifier.height(14.dp))
-        }
+        // v1.8.5：文字**始终占位**，用透明度切换显隐。
+        // 旧实现「选中才挂 Text + 固定 12/14dp 槽」有两个坑：
+        // ① 大系统字体下槽高装不下，基线被压出槽底（截图里「首页」贴边溢出）；
+        // ② 显示/隐藏两态的图标重心不一致，切换时图标会跳。
+        // 现在文字按自然高度排版（不再写死槽高），未选中时 alpha=0 占位，
+        // 布局恒定、永不溢出、重心稳定。
+        Text(
+            item.label,
+            style = LType.Micro,
+            color = colors.accent,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            modifier = Modifier.graphicsLayer { alpha = if (showLabel) 1f else 0f }
+        )
     }
 }
 

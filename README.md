@@ -1,4 +1,4 @@
-# LPdf 1.8.4 · Android PDF 阅读器
+# LPdf 1.8.5 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.8.4-release.apk
+adb install -r dist/LPdf-1.8.5-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -36,6 +36,17 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.8.5 变更
+
+**点阵渲染矩阵根因修复 + 阅读页玻璃整理**
+
+- 修复 PDF 内容缩在左侧约一半宽、右侧一大片白的真正根因：pdfium 矩阵版渲染的语义是「pt→px」，旧代码只传了降级系数（=1），595pt 的 A4 只画进 595px。现在按 位图宽 ÷ 页面点阵宽 × 降级系数 计算（v1.7.5 升级 pdfium 1.0.35 引入的回归，图片型 PDF 因页宽恰为像素值而未暴露）
+- 顶栏收进 56dp 玻璃胶囊：标题/页码不再浮在书页内容上、不再与正文文字混叠
+- 删除底部独立的页码胶囊（与 Dock 主胶囊重复且半透明叠影），页码只保留 Dock 一处
+- 主底栏文字改为始终占位 + 透明度切换：大系统字体下不再贴边溢出，切换选中时图标重心不跳
+- versionCode 185
+
 
 ## 1.8.4 变更
 

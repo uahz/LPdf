@@ -145,7 +145,16 @@ object PdfiumEngine {
                 val r = plan.rects.first()
                 val bitmap = Bitmap.createBitmap(r.width, r.height, Bitmap.Config.ARGB_8888)
                 bitmap.eraseColor(Color.WHITE)
-                val matrix = android.graphics.Matrix().apply { postScale(plan.scale, plan.scale) }
+                // v1.8.5 关键修复：矩阵版渲染的语义是 FPDF_RenderPageBitmapWithMatrix ——
+                // 矩阵把**页面点阵(pt)**映射到位图像素。旧代码传的 plan.scale 只是
+                // 降级系数（正常 = 1），等于 1pt = 1px：595pt 的 A4 只画进 595px，
+                // 在 1080px 宽的位图上就是「内容缩在左侧、右边一大片白」。
+                // pt→px 比例必须用 位图宽 / 页面点阵宽，再乘降级系数。
+                val ptToPx = plan.widthPx.toFloat() /
+                    page.getPageWidthPoint().coerceAtLeast(1)
+                val matrix = android.graphics.Matrix().apply {
+                    postScale(ptToPx * plan.scale, ptToPx * plan.scale)
+                }
                 val clip = android.graphics.RectF(0f, 0f, r.width.toFloat(), r.height.toFloat())
                 page.renderPageBitmap(bitmap, matrix, clip, true, true, 0, 0)
                 PdfResult.Success(bitmap)
@@ -301,11 +310,15 @@ object PdfiumEngine {
                             bmp.eraseColor(Color.WHITE)
                             done += bmp
 
-                            // 用矩阵版渲染：把整页按 scale 缩放后，只把 (left, top) 起的
-                            // 那一块画到位图原点。比用负偏移可靠 —— 负偏移的语义
-                            // 在 pdfiumandroid 里没有任何文档。
+                            // 用矩阵版渲染：把整页按 pt→px 比例 × 降级系数缩放后，
+                            // 只把 (left, top) 起的那一块画到位图原点。
+                            // 矩阵语义见上方 renderPage 的注释 —— 必须是 pt→px，
+                            // 只传 plan.scale 会让 595pt 的 A4 缩在位图左侧（v1.8.5 修复）。
+                            val ptToPx = plan.widthPx.toFloat() /
+                                page.getPageWidthPoint().coerceAtLeast(1)
+                            val drawScale = ptToPx * plan.scale
                             val matrix = android.graphics.Matrix().apply {
-                                postScale(plan.scale, plan.scale)
+                                postScale(drawScale, drawScale)
                                 postTranslate(-r.left.toFloat(), -r.top.toFloat())
                             }
                             val clip = android.graphics.RectF(
