@@ -35,7 +35,7 @@ val hasReleaseSigning = releaseStorePath != null &&
 
 android {
     namespace = "com.lpdf.reader"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.lpdf.reader"
