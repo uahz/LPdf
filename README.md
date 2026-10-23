@@ -1,4 +1,4 @@
-# LPdf 1.7.5 · Android PDF 阅读器
+# LPdf 1.8.0 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.7.5-release.apk
+adb install -r dist/LPdf-1.8.0-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -27,7 +27,7 @@ export JAVA_HOME=/opt/jdk21
 export ANDROID_HOME=/opt/android-sdk
 ./gradlew :app:assembleRelease       # 产物 app/build/outputs/apk/release/
 ./gradlew :app:assembleDebug         # 仅供本地调试，不发布
-./gradlew :app:testDebugUnitTest     # 226 个单测
+./gradlew :app:testDebugUnitTest     # 251 个单测
 ./gradlew :app:lintDebug             # 静态检查，0 error 才算过
 ```
 
@@ -36,6 +36,16 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.8.0 变更
+
+工具箱新增**元数据编辑**（v1.8.0）：读取 / 修改 PDF 的标题、作者、主题、关键词，只读展示生产器与创建时间。
+
+- 新增 `MetadataEditor`：读写都走 PDFBox（`PDDocumentInformation`），只改 `/Info` 字典，不碰页面内容流
+- 输出为新文件到 exports，原文件不动；加密文档提示只读；失败自动清半成品
+- 默认刷新修改时间（与桌面编辑器一致）；创建时间保留
+- 新增 5 项端到端单测；versionCode 180
+
 
 ## 1.7.5 变更
 

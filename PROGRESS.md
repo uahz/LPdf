@@ -1,7 +1,7 @@
 # LPdf 开发进度
 
-> 更新时间：2026-10-22 21:00
-> 当前版本：**v1.7.4**（versionCode 174）
+> 更新时间：2026-10-23 11:30
+> 当前版本：**v1.8.0**（versionCode 180）
 > 仓库：https://github.com/uahz/LPdf
 
 ---
@@ -10,10 +10,10 @@
 
 | 指标 | 数值 |
 | --- | --- |
-| 当前版本 | v1.7.4 |
-| versionCode | 174 |
-| 最近发布 | [v1.7.4](https://github.com/uahz/LPdf/releases/tag/v1.7.4)（2026-10-22） |
-| 单测数量 | **246 项，全绿**（v1.7.5 增 17 项：分段写入 6 + 网络安全/文件名 11） |
+| 当前版本 | v1.8.0 |
+| versionCode | 180 |
+| 最近发布 | [v1.7.5](https://github.com/uahz/LPdf/releases/tag/v1.7.5)（2026-10-22） |
+| 单测数量 | **251 项**（v1.8.0 增 5 项元数据端到端测试） |
 | Lint | **0 error / 11 warning**（已进 CI，`abortOnError = true`） |
 | APK 体积 | **24.01 MB**（25,175,495 字节，含 PDFBox） |
 | CI 签名 | ✅ 已配置 4 个 secrets，CI 产物为签名包 |
@@ -39,13 +39,48 @@
 | v1.7.3 | 打开 PDF 自动适配屏幕（单页一屏看全 / 连续首屏适配）+ 页高修正 | ✅ 已发布 |
 | **v1.7.4** | **v1.7.3 自查修 bug：横屏上下文、宽高比锁死、滚动视口误扣胶囊** | ✅ **已发布** |
 | **v1.7.5** | **审计修复（OOM 分段落盘 / HTTPS 降级 / 文件名）+ pdfium 1.0.35** | ✅ **已发布** |
-| v1.8.0 | 元数据编辑（PDFBox 依赖已接入） | 🚧 进行中 |
-| v1.9.0+ | PDF 工具箱 / 安全 / 签名（见第八章与附录 A.6） | ⬜ 待开始 |
+| **v1.8.0** | **工具箱元数据编辑（读/写 PDF 属性）** | ✅ 已发布（见 §2.x） |
+| v1.9.0+ | PDF 工具箱 / 安全 / 签名（见附录 A.6与附录 A.6） | ⬜ 待开始 |
 | v2.0.0 | 多语言 | ⬜ 待开始 |
 
 ---
 
-## 二、v1.7.5 已完成的工作（本轮：代码审计修复）
+## 二、v1.8.0 已完成的工作（工具箱元数据编辑）
+
+> 功能：工具箱新增「元数据」分组，可读取并修改 PDF 的标题 / 作者 / 主题 / 关键词，
+> 输出为新文件到 exports，原文件不动。
+
+### 1. 数据层 `MetadataEditor`（新文件）✅
+
+- 读写都走 PDFBox（`PDDocumentInformation`），不走 pdfium —— pdfium 的 meta
+  只有四个字段且读不到创建时间与生产器
+- `read(file)`：返回 `Meta`（四个可编辑字段 + producer / creationDate 只读展示），
+  加密文档统一归入 `PasswordRequired`，损坏文件归入 `Corrupted`
+- `write(src, outFile, editable)`：只改 `/Info` 字典 + 重建 xref，**不碰页面内容流**；
+  落盘只走 PDFBox `save()`，产物**绝不允许再进 pdfium `saveAsCopy` 通路**（附录 A.7）
+- 默认刷新 ModificationDate（与桌面编辑器一致）；失败时清理半成品，不留损坏文件
+- 不做增量保存：`saveIncremental` 要求输出流定位到原文件尾部，对「另存到 exports」
+  模式无意义
+
+### 2. UI 层 `PdfToolsPage` ✅
+
+- 工具箱新增「元数据」分组：四个输入框（标题/作者/主题/关键词）+ 读取/保存按钮
+- 「读取」把文档现有字段填进输入框，同时展示只读的生产器与创建时间；
+  未读取前保存按钮禁用，避免盲目覆盖
+- 保存走既有 `run()` 通路：进度显示、完成后可分享，与工具箱其余功能一致
+
+### 3. 测试 ✅
+
+- 新增 `MetadataEditorTest`（5 项，纯 JVM）：写读往返一致、源文件字节不变、
+  ModificationDate 刷新且创建时间保留、非 PDF 归入损坏错误、失败不留半成品
+
+### 版本
+
+- versionCode 175 → 180，versionName 1.8.0
+
+---
+
+## 三、v1.7.5 已完成的工作（本轮：代码审计修复）
 
 > 起因：外部代码审计报告指出 6 个问题。逐条复核后**全部确认成立**，
 > 其中 ① OOM 属架构级缺陷，② pdfium 版本问题经实测**结论与报告不同**（详见 §2.6）。
@@ -194,7 +229,7 @@
 
 ---
 
-## 三、v1.7.4 已完成的工作
+## 四、v1.7.4 已完成的工作
 
 用户要求「查看是否存在 bug 或其他问题，没问题之后再同步」。逐行复核 v1.7.3 新增代码，**发现 3 个真 bug**，全部修掉并补测试。
 
@@ -244,7 +279,7 @@ val firstAspect = remember(state.docKey) { vm.renderFor(state.currentPage)?.aspe
 
 ---
 
-## 四、v1.7.3 已完成的工作
+## 五、v1.7.3 已完成的工作
 
 用户反馈：「先把打开 PDF 时自动适配对应大小给做好，然后再继续开发 V1.8.0」。
 
@@ -313,7 +348,7 @@ val pageHeightDp = (visibleWidthPx * aspect / density).dp
 
 ---
 
-## 五、v1.7.2 已完成的工作
+## 六、v1.7.2 已完成的工作
 
 三张真机截图驱动的修正版本。用户原话：
 
@@ -437,7 +472,7 @@ private fun tabCenterY(label: String): Float? {
 
 ---
 
-## 六、v1.7.1 已完成的工作
+## 七、v1.7.1 已完成的工作
 
 收尾性质，只做"减重 + 把静态检查真正跑起来"两件事，但过程中挖出的问题比预期多。
 
@@ -617,7 +652,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 七、v1.7.0 已完成的工作
+## 八、v1.7.0 已完成的工作
 
 | 功能 | 实现要点 |
 | --- | --- |
@@ -628,7 +663,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 八、网盘同步状态
+## 九、网盘同步状态
 
 **v1.5.2 起的阻塞已解除**（原为 COS 403 `SignatureDoesNotMatch`，平台临时凭证失效，服务端侧问题）。
 
@@ -657,7 +692,7 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 
 ---
 
-## 九、后续版本计划
+## 十、后续版本计划
 
 ### ✅ v1.7.5 · 代码审计修复（已发布 2026-10-23）
 
@@ -665,17 +700,14 @@ aapt2 dump xmltree app-release.apk --file res/BW.xml
 pdfium 1.0.32 → 1.0.35（`.so` 与 2.0.3 字节一致）。不新增用户可见功能，
 但把四条最重的写出管线的内存模型换掉了。Release 资产与网盘均为升级后新包。
 
-### v1.8.0 · 元数据编辑（进行中）
+### ✅ v1.8.0 · 元数据编辑（已发布 2026-10-23）
 
-**决策：引 PDFBox**（2026-10-23 用户确认）。技术选型不再摇摆，理由见 [A.5](#a5-核心差距的根因写通路全是栅格)。**依赖已接入并实测**：体积 +2.70 MB（见 [A.8](#a8-体积账已实测非估算)），`PDFBoxResourceLoader.init` 已加在 `LpdfApplication.onCreate`。
+**决策：引 PDFBox**（2026-10-23 用户确认）。依赖 +2.70 MB，`PDFBoxResourceLoader.init` 在 `LpdfApplication.onCreate`。
 
-- 读取已有元数据（pdfium `getDocumentMeta()` 已实现但**零调用点**，等于没做）
-- 写入标题 / 作者 / 主题 / 关键词，**且要真正写进 PDF 文件**（不再考虑"应用内覆盖显示"那条退路）
-- 写入边界：只改 `/Info` 字典 + 重建 xref，不碰页面内容流
-
-**必须先做的一件事**：搞清 pdfium 的 `saveAsCopy` 会不会把 PDFBox 的增量更新吃掉。
-如果先 PDFBox 改、再 pdfium 存，改动会丢——所以写入后**不能再经过 pdfium 保存通路**。
-详见 [A.7](#a7-两条写入通路的关系必须先说清)。
+- 工具箱新增「元数据」分组：读取 / 编辑标题、作者、主题、关键词；producer 与创建时间只读展示
+- 写入只改 `/Info` 字典 + 重建 xref，不碰页面内容流；产物**不再经过 pdfium 保存通路**（A.7）
+- 输出到 exports 新文件，原文件只读；失败清半成品
+- 详见第二章；发布记录见第九章与 Release v1.8.0
 
 ### v1.9.0 · PDF 工具箱第一批（PDFBox 解锁）
 

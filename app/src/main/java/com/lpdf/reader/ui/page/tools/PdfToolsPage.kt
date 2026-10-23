@@ -35,6 +35,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lpdf.reader.AppContainer
 import com.lpdf.reader.core.di.AppDispatchers
 import com.lpdf.reader.core.util.Formatters
+import com.lpdf.reader.data.pdf.MetadataEditor
 import com.lpdf.reader.data.pdf.PdfWriterEngine
 import com.lpdf.reader.ui.glass.GlassDivider
 import com.lpdf.reader.ui.glass.GlassGroup
@@ -100,6 +101,27 @@ class ToolsViewModel(private val container: AppContainer) : ViewModel() {
     fun merge(files: List<File>) = run("正在合并…") { out, p ->
         PdfWriterEngine.merge(files, out, p)
     }
+
+    /** 读取元数据（v1.8.0）。结果经回调交给 UI 填充输入框，不占 running 状态 */
+    fun readMetadata(file: File, onResult: (MetadataEditor.Meta?) -> Unit) {
+        viewModelScope.launch {
+            when (val res = MetadataEditor.read(file)) {
+                is com.lpdf.reader.core.model.PdfResult.Success -> onResult(res.value)
+                is com.lpdf.reader.core.model.PdfResult.Failure -> {
+                    _state.value = _state.value.copy(
+                        toast = GlassToast(text = res.error.message ?: "读取元数据失败")
+                    )
+                    onResult(null)
+                }
+            }
+        }
+    }
+
+    /** 写入元数据（v1.8.0）。输出到 exports，与工具箱其余功能一致 */
+    fun saveMetadata(file: File, editable: MetadataEditor.Editable) =
+        run("正在写入元数据…") { out, _ ->
+            MetadataEditor.write(file, out, editable)
+        }
 
     /**
      * 给整份文档打水印（v1.3）。
@@ -579,6 +601,15 @@ private fun PdfToolsContent(
 
             Spacer(Modifier.height(20.dp))
 
+            MetadataGroup(
+                file = file,
+                running = state.running,
+                onRead = { onResult -> vm.readMetadata(file, onResult) },
+                onSave = { editable -> vm.saveMetadata(file, editable) }
+            )
+
+            Spacer(Modifier.height(20.dp))
+
             GlassGroup("结果") {
                 Row(
                     Modifier.padding(16.dp),
@@ -813,6 +844,117 @@ private fun WatermarkGroup(
                 enabled = !running && text.isNotBlank()
             )
         }
+    }
+}
+
+/**
+ * 元数据分组（v1.8.0）。
+ *
+ * 「读取」把文档里的 title/author/subject/keywords 填进输入框供修改，
+ * producer 与创建时间只读展示；「保存」总是产出新文件到 exports，原文件不动。
+ */
+@Composable
+private fun MetadataGroup(
+    file: File,
+    running: Boolean,
+    onRead: ((MetadataEditor.Meta?) -> Unit) -> Unit,
+    onSave: (MetadataEditor.Editable) -> Unit
+) {
+    val colors = LocalColors.current
+    var title by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    var author by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    var subject by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    var keywords by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    var info by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    var loaded by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+
+    GlassGroup("元数据") {
+        Column(Modifier.padding(16.dp)) {
+            Text(
+                "修改文档属性（标题 / 作者 / 主题 / 关键词），输出为新文件，原文件不变",
+                style = LType.Micro,
+                color = colors.secondary
+            )
+            Spacer(Modifier.height(10.dp))
+
+            MetadataField("标题", title, colors.text, colors.accent) { title = it.take(120) }
+            MetadataField("作者", author, colors.text, colors.accent) { author = it.take(80) }
+            MetadataField("主题", subject, colors.text, colors.accent) { subject = it.take(120) }
+            MetadataField("关键词", keywords, colors.text, colors.accent) { keywords = it.take(120) }
+
+            if (loaded && info.isNotBlank()) {
+                Spacer(Modifier.height(6.dp))
+                Text(info, style = LType.Micro, color = colors.secondary)
+            }
+
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                GlassPillButton(
+                    "读取",
+                    {
+                        onRead { meta ->
+                            if (meta != null) {
+                                title = meta.title
+                                author = meta.author
+                                subject = meta.subject
+                                keywords = meta.keywords
+                                info = buildString {
+                                    if (meta.producer.isNotBlank()) append("生产器：${meta.producer}")
+                                    if (meta.creationDate.isNotBlank()) {
+                                        if (isNotEmpty()) append(" · ")
+                                        append("创建于 ${meta.creationDate}")
+                                    }
+                                }
+                                loaded = true
+                            }
+                        }
+                    },
+                    Modifier.weight(1f),
+                    height = 40.dp,
+                    enabled = !running
+                )
+                GlassPillButton(
+                    "保存为新文件",
+                    {
+                        onSave(
+                            MetadataEditor.Editable(
+                                title = title, author = author,
+                                subject = subject, keywords = keywords
+                            )
+                        )
+                    },
+                    Modifier.weight(1f),
+                    height = 40.dp,
+                    enabled = !running && loaded
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MetadataField(
+    label: String,
+    value: String,
+    textColor: androidx.compose.ui.graphics.Color,
+    accent: androidx.compose.ui.graphics.Color,
+    onChange: (String) -> Unit
+) {
+    Row(
+        Modifier.padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, style = LType.Caption, color = textColor, modifier = Modifier.width(52.dp))
+        androidx.compose.foundation.text.BasicTextField(
+            value = value,
+            onValueChange = onChange,
+            singleLine = true,
+            textStyle = LType.Body.copy(color = textColor),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(accent),
+            modifier = Modifier
+                .weight(1f)
+                .padding(vertical = 6.dp)
+        )
     }
 }
 
