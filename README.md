@@ -1,4 +1,4 @@
-# LPdf 1.8.3 · Android PDF 阅读器
+# LPdf 1.8.4 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.8.3-release.apk
+adb install -r dist/LPdf-1.8.4-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -36,6 +36,16 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.8.4 变更
+
+**降级渲染坐标根因修复 + 底栏高亮柔化**
+
+- 修复 PDF 页面缩在左上角约 40% 宽、周围一大片空白的真正根因：页面超出分块预算触发降级渲染时，tile 坐标停留在缩小后的坐标系，UI 却按整页理想宽映射 —— 现在产出 Tile 时统一换算回理想坐标系
+- 主底栏选中高亮去掉生硬的蓝色描边，改纯填充淡色胶囊并加大到完整包住图标+文字
+- 选中项文字槽 12→14dp，修复「首页」文字溢到栏外
+- versionCode 184
+
 
 ## 1.8.3 变更
 

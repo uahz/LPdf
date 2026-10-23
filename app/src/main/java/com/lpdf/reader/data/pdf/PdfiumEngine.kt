@@ -19,6 +19,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 /**
  * PDFium 渲染内核封装。
@@ -321,13 +322,24 @@ object PdfiumEngine {
                                 InvertFilter.apply(bmp)
                             }
 
+                            // v1.8.4 关键修复：Tile 坐标必须回到「整页理想坐标系」。
+                            //
+                            // plan.rects 在降级路径（scale < 1）里是**缩小后**的坐标
+                            // （gridTiles(sw, sh)，总宽 sw = widthPx×scale），而
+                            // PageRender 的不变量是「tile 坐标基于 widthPx×heightPx 的
+                            // 理想尺寸」。旧代码直接透传 r.left/r.width，UI 按
+                            // sx = 容器宽 / widthPx 映射后，降级页只画在容器左上角的
+                            // scale 比例处 —— 用户截图里「页面缩在左上角 40% 宽、
+                            // 周围一大片空白」正是这个原因（scale ≈ 0.4）。
+                            // scale = 1 时两者重合，所以普通页面一直没暴露。
+                            val invScale = 1f / plan.scale.coerceAtLeast(0.0001f)
                             onTile(
                                 Tile(
                                     index = idx,
-                                    left = r.left,
-                                    top = r.top,
-                                    width = r.width,
-                                    height = r.height,
+                                    left = (r.left * invScale).roundToInt(),
+                                    top = (r.top * invScale).roundToInt(),
+                                    width = (r.width * invScale).roundToInt(),
+                                    height = (r.height * invScale).roundToInt(),
                                     bitmap = bmp
                                 )
                             )

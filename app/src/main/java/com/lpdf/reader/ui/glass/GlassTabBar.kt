@@ -155,8 +155,13 @@ fun GlassTabBar(
         // 槽：x ∈ [i*w, (i+1)*w]，垂直占满内层。
         // 指示器：宽 itemWidth - 12dp，高 innerHeight - 8dp，在槽内水平居中、垂直居中。
         // 没有第二个坐标系、没有写死的偏移 —— 不可能再溢出。
-        val pillWidth = itemWidthDp - 12.dp
-        val pillHeight = innerHeight - 8.dp
+        // v1.8.4：指示器改回**纯填充**淡色胶囊，去掉 1dp 描边。
+        // 用户反馈描边高亮「生硬」（截图里是一圈扎眼的蓝框）——
+        // iOS 26 的选中态就是一层柔和的色块，没有描边。
+        // 同时加大胶囊（itemWidth-8dp × innerHeight-4dp），把选中项的
+        // 图标+文字完整包住，避免「文字挂在色块外面」的割裂感。
+        val pillWidth = itemWidthDp - 8.dp
+        val pillHeight = innerHeight - 4.dp
         val pillCenterX = when {
             pressedIndex >= 0 && !followSelection -> (pressedIndex + 0.5f) * itemWidthPx
             indicatorX.value > 0f -> indicatorX.value
@@ -252,16 +257,9 @@ fun GlassTabBar(
                             val r = pillHeight.toPx() / 2f
                             drawRoundRect(
                                 color = colors.accent.copy(
-                                    alpha = if (colors.isDark) 0.22f else 0.14f
+                                    alpha = if (colors.isDark) 0.24f else 0.15f
                                 ),
                                 cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r)
-                            )
-                            drawRoundRect(
-                                color = colors.accent.copy(
-                                    alpha = if (colors.isDark) 0.35f else 0.28f
-                                ),
-                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r),
-                                style = Stroke(width = 1.dp.toPx())
                             )
                         }
                 )
@@ -414,10 +412,13 @@ private fun TabItem(
                 color = colors.accent,
                 textAlign = TextAlign.Center,
                 maxLines = 1,
-                modifier = Modifier.height(12.dp)
+                // v1.8.4：文字槽 12dp → 14dp。Micro 行高约 13dp，
+                // 旧的 12dp 槽会把基线压出槽底，真机上就是截图里
+                // 「首页」两个字溢到栏外的样子。
+                modifier = Modifier.height(14.dp)
             )
         } else {
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(14.dp))
         }
     }
 }
