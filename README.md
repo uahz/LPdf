@@ -1,4 +1,4 @@
-# LPdf 1.7.4 · Android PDF 阅读器
+# LPdf 1.7.5 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.7.4-release.apk
+adb install -r dist/LPdf-1.7.5-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -36,6 +36,37 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.7.5 变更
+
+外部代码审计提出 6 项问题，逐条复核后全部处理。这一版不新增功能，但把**四条最重的写出管线换掉了内存模型**。
+
+### 工具箱 OOM（架构级）
+
+合并、拆分、压缩、加水印、导出批注原来都是同一个模式：逐页渲染成位图 → 塞进 `PdfDocument` → 循环全部结束后一次性 `writeTo`。而 `android.graphics.pdf.PdfDocument` 会把**所有页的绘制命令留在内存里**直到落盘，没有任何 API 能中途释放。单页底图最宽 1600px（ARGB ≈ 10MB），在线导入上限 100MB 可能是数百页 —— 这个组合必然 OOM。
+
+改为**分段落盘**（新增 `SegmentedPdfWriter`）：每 8 页写一段、立即 `close()` 释放，最后用 PDFBox `PDFMergerUtility` 做对象级合并。**峰值内存与总页数解耦。**
+
+顺带修掉两个藏得更深的：超长页位图只限了宽没限高（`1600×30000` = 192MB，一张就能打死进程），以及异常路径上位图漏回收。
+
+### HTTPS → HTTP 重定向降级
+
+OkHttp 默认会跟随 https 跳 http。只在入口校验 `startsWith("https://")` 挡不住服务器 302 到明文地址 —— 中间人可以替换成「带合法 `%PDF-` 头」的恶意文件，魔数校验形同虚设。现在关闭内置跟随，改为**逐跳**验协议，最多 5 跳。
+
+### 其余四项
+
+- **进度计算**：导出全部页的进度显式改为 `(i + 1).toFloat() / total`，加注释防回退
+- **%00 文件名**：URL 百分号编码不再原样进文件名（`%00` 会导致 `EINVAL` 这样的底层错误）
+- **路径前缀**：`deleteImported` 不再把 `imported_backup` 这类兄弟目录算进来
+- **pdfium 版本**：报告称内嵌 `1.3.0.1-motley` ≈ 2022 年快照。实测这是 pdfium 的**内部 API 号**，不是 Chromium 快照号 —— `2.0.3`（2026-07 发布）携带的 `libpdfium.so` 与 `1.0.35` 字节完全一致。升级仍排入 1.8.0，因为安全补丁无从从版本串判断
+
+| 项 | 结果 |
+| --- | --- |
+| 单测 | **246 项，0 失败**（新增 17 项） |
+| Lint | **0 error / 8 warning** |
+| 包信息 | `versionCode=175` / `versionName=1.7.5` |
+| APK | 25,175,492 字节（24.01 MB，含 PDFBox） |
+| 签名 | 与 1.1.0 以来一致，可覆盖升级 |
 
 ## 1.7.4 变更
 
