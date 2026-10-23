@@ -92,7 +92,7 @@ import com.lpdf.reader.ui.glass.GlassSnackbarHost
 import com.lpdf.reader.ui.glass.GlassSlider
 import com.lpdf.reader.ui.glass.GlassStateCard
 import com.lpdf.reader.ui.glass.GlassTab
-import com.lpdf.reader.ui.glass.GlassTabBar
+
 import com.lpdf.reader.ui.glass.LIcon
 import com.lpdf.reader.ui.glass.LIconView
 import com.lpdf.reader.ui.glass.LiquidGlass
@@ -135,7 +135,6 @@ fun PdfReaderPage(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     // 首屏「一屏一页」是否已经被跳过（续读 / 跳页时跳过）。见 needFirstFit 段注释。
-    var skipFirstFit by remember { mutableStateOf(false) }
 
     // 设置项要先于 bind 落地：open() 里的「是否恢复上次进度」直接读
     // rememberPosition，晚一拍就会用默认值 true 走一遍错误的分支。
@@ -200,7 +199,6 @@ fun PdfReaderPage(
     LaunchedEffect(state.currentPage, state.pageCount) {
         // v1.7.3：续读进度可能落在很靠后的页，此时首屏不算「第一页」，
         // 不该因为它把页面缩成一屏一页（用户看到的是续读页，不是封面）。
-        if (state.pageCount > 0 && state.currentPage != 0) skipFirstFit = true
         if (state.pageCount > 0 && listState.firstVisibleItemIndex != state.currentPage) {
             runCatching { listState.scrollToItem(state.currentPage) }
         }
@@ -320,49 +318,13 @@ fun PdfReaderPage(
                     val hPad = PageFit.horizontalPadding(contentWidthDp.value).dp
                     val hPadPx = with(LocalDensity.current) { hPad.toPx() }
                     val fullWidthPx = (contentWidthPx - hPadPx * 2).toInt().coerceAtLeast(240)
-                    // v1.7.3：连续模式首屏「一屏一页」。
+                    // v1.8.2：页面永远铺满内容区宽度（用户明确要求图二效果）。
                     //
-                    // 连续模式天生按宽铺满，A4 在竖屏上必然高过一屏 —— 首屏只能看到
-                    // 本页上半截 + 下一页开头，观感就是「页面在中间一小条里滚动」。
-                    // 这里只在**首屏**（还没滚动过）收紧宽度，让一整页落在可见区内；
-                    // 用户第一次滚动之后立刻恢复铺满，不去干扰正常的连续阅读。
-                    // 连续模式只扣顶部工具条：页码胶囊盖的是列表底部，
-                    // 页面正常从它下面滑过，用它的高度限制页面等于平白少显示 100dp。
-                    val densityNow = LocalDensity.current.density
-                    val viewportH = PageFit.scrollViewportHeightPx(
-                        availableHeightPx = contentHeightPx,
-                        density = densityNow,
-                        chromeVisible = state.chromeVisible
-                    )
-                    // 首屏判断用的宽高比：只要当前页已经拿到真实比例就立刻换上。
-                    //
-                    // 打开文档的那一瞬间渲染还没开始，这里只能拿到 A4 兜底值。
-                    // 若只在 docKey 变化时 remember 一次，A4 兜底值会被永久锁住 ——
-                    // 一本 16:9 横排 PDF 明明一屏放得下，却按 A4 判成溢出并缩小。
-                    val realAspect = vm.renderFor(state.currentPage)?.aspect
-                    val firstAspect = remember(state.docKey, realAspect) {
-                        realAspect ?: 1.4142f
-                    }
-                    val atTop = listState.firstVisibleItemIndex == 0 &&
-                        listState.firstVisibleItemScrollOffset < 8
-                    val needFirstFit = state.pageCount > 0 && contentHeightPx > 0 && atTop &&
-                        !PageFit.pageFitsViewport(fullWidthPx, firstAspect, viewportH)
-                    // 首屏收缩开关：只在打开文档那一刻判定一次，之后不再重算。
-                    //
-                    // 不能「一直看 atTop」：收缩后页面不再溢出，滚动条永远停在顶端，
-                    // atTop 就不会变 false —— 开关一旦生效就再也回不到铺满，
-                    // 用户无论怎么滑都还是缩小的页面。所以这里锁定成一个状态。
-                    var firstFitLatched by remember(state.docKey) { mutableStateOf<Boolean?>(null) }
-                    LaunchedEffect(state.docKey, state.pageCount, contentHeightPx, viewportH, fullWidthPx) {
-                        if (firstFitLatched == null && state.pageCount > 0 && contentHeightPx > 0) {
-                            firstFitLatched = needFirstFit && !skipFirstFit
-                        }
-                    }
-                    val pageWidthPx = if (firstFitLatched == true) {
-                        PageFit.firstScreenWidthPx(fullWidthPx, viewportH, firstAspect)
-                    } else {
-                        fullWidthPx
-                    }
+                    // v1.7.3 加的「首屏缩小让整页落进一屏」在真机上表现极差：
+                    // 首屏比例还没拿到时按 A4 兜底收缩，锁存后整份文档永远缩小，
+                    // 页面周围一大片空白（用户截图）。连续滚动模式的价值就是
+                    // 按宽铺满、上下滚动，不再做任何首屏收缩。
+                    val pageWidthPx = fullWidthPx
                     LazyColumn(
                         state = listState,
                         contentPadding = PaddingValues(
@@ -432,7 +394,7 @@ fun PdfReaderPage(
                 exit = fadeOut() + scaleOut(targetScale = 0.9f),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 92.dp)
+                    .padding(bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 132.dp)
             ) {
                 PagePill(page = state.currentPage + 1, total = state.pageCount)
             }
@@ -444,7 +406,7 @@ fun PdfReaderPage(
                 exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 150.dp)
+                    .padding(bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 188.dp)
             ) {
                 ToolIsland(
                     tool = state.tool,
@@ -492,9 +454,10 @@ fun PdfReaderPage(
                     haptic = settings.hapticFeedback,
                     tool = state.tool,
                     tocOpen = state.tocOpen,
-                    bookmarkCount = state.bookmarks.size,
                     bookmarked = state.currentPageBookmarked,
                     searchActive = state.searchOpen || state.searchHits.isNotEmpty(),
+                    page = (state.currentPage + 1).coerceAtMost(state.pageCount.coerceAtLeast(1)),
+                    total = state.pageCount,
                     onTool = { t ->
                         vm.setTool(if (state.tool == t) EditorTool.NONE else t)
                         if (t == EditorTool.NONE) vm.closeToolIsland()
@@ -502,9 +465,12 @@ fun PdfReaderPage(
                     onToc = vm::toggleToc,
                     onBookmarks = vm::toggleBookmarksPanel,
                     onSearch = vm::openSearch,
-                    onBookmarkToggle = { vm.toggleBookmarkOnCurrentPage() },
                     onPrev = { vm.onPageSettled((state.currentPage - 1).coerceAtLeast(0)) },
-                    onNext = { vm.onPageSettled((state.currentPage + 1).coerceAtMost(state.pageCount - 1)) }
+                    onNext = { vm.onPageSettled((state.currentPage + 1).coerceAtMost(state.pageCount - 1)) },
+                    onClose = {
+                        vm.flushAsync()
+                        onClose()
+                    }
                 )
             }
 
@@ -1258,52 +1224,55 @@ private fun ReaderTopBar(
     onToc: () -> Unit
 ) {
     val colors = LocalColors.current
-    Row(
+    // v1.8.2：标题绝对居中 + 按钮放大。
+    //
+    // 旧版用两个 weight(1f) 的 Spacer 夹标题，但左右两侧按钮数量不同
+    // （右侧比左侧多一个夜间按钮），标题实际是偏的 —— 用户截图圈出来。
+    // 新版标题用 Box 居中叠放，按钮行独立排布；按钮 40 → 44dp、图标同步放大。
+    Box(
         Modifier
             .fillMaxWidth()
             .padding(
                 start = LSpace.pageHorizontal,
                 end = LSpace.pageHorizontal,
                 top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp
-            ),
-        verticalAlignment = Alignment.CenterVertically
+            )
     ) {
-        GlassIconButton(LIcon.ChevronLeft, "返回", onBack, size = 40.dp)
-        Spacer(Modifier.weight(1f))
-        LiquidGlass(Modifier.height(38.dp), shape = pillShape(38f)) {
-            Row(
-                Modifier
-                    .height(38.dp)
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        title,
-                        style = LType.Caption,
-                        color = colors.text,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    if (subtitle.isNotEmpty()) {
-                        Text(subtitle, style = LType.Micro, color = colors.secondary)
-                    }
-                }
+        // 居中标题（绝对居中，不参与按钮行的空间分配）
+        Column(
+            Modifier.align(Alignment.Center),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                title,
+                style = LType.Body,
+                color = colors.text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (subtitle.isNotEmpty()) {
+                Text(subtitle, style = LType.Micro, color = colors.secondary)
             }
         }
-        Spacer(Modifier.width(8.dp))
-        // 夜间模式：图标随状态切换（亮时显示月亮=「点了会变暗」）
-        GlassIconButton(
-            if (night) LIcon.Sun else LIcon.Moon,
-            if (night) "切换到日间" else "夜间模式",
-            onNight,
-            size = 40.dp
-        )
-        Spacer(Modifier.weight(1f))
-        if (hasToc) {
-            GlassIconButton(LIcon.List, "目录", onToc, size = 40.dp)
-        } else {
-            Spacer(Modifier.width(40.dp))
+
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            GlassIconButton(LIcon.ChevronLeft, "返回", onBack, size = 44.dp)
+            Spacer(Modifier.weight(1f))
+            GlassIconButton(
+                if (night) LIcon.Sun else LIcon.Moon,
+                if (night) "切换到日间" else "夜间模式",
+                onNight,
+                size = 44.dp
+            )
+            Spacer(Modifier.width(10.dp))
+            if (hasToc) {
+                GlassIconButton(LIcon.List, "目录", onToc, size = 44.dp)
+            } else {
+                Spacer(Modifier.width(44.dp))
+            }
         }
     }
 }
@@ -1337,84 +1306,151 @@ private fun ReaderDock(
     haptic: Boolean,
     tool: EditorTool,
     tocOpen: Boolean,
-    bookmarkCount: Int,
     bookmarked: Boolean,
     searchActive: Boolean,
+    page: Int,
+    total: Int,
     onTool: (EditorTool) -> Unit,
     onToc: () -> Unit,
     onBookmarks: () -> Unit,
     onSearch: () -> Unit,
-    onBookmarkToggle: () -> Unit,
     onPrev: () -> Unit,
-    onNext: () -> Unit
+    onNext: () -> Unit,
+    onClose: () -> Unit
 ) {
     val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
-
-    // v1.4.0：换成与首页一致的 iOS 玻璃药丸滑块。
-    //
-    // 旧版是「一排 DockBtn 装进一个玻璃盒」，选中态只是给按钮加一层淡底色，
-    // 没有"浮起来"的层次。新版让选中的那一项外面包一片独立玻璃药丸，
-    // 它会随工具切换做弹簧滑动，跟上一次选中项之间留一点惯性。
-    //
-    // 「上一页 / 下一页」是瞬动按钮，不参与选中逻辑，所以整条 dock 用
-    // followSelection = false 关闭滑块的自动跟随 —— 但药丸仍会被拖动。
-    val tabs = remember {
-        listOf(
-            GlassTab(LIcon.ChevronLeft, "上一页"),
-            GlassTab(LIcon.List, "目录"),
-            GlassTab(LIcon.Bookmark, "书签"),
-            GlassTab(LIcon.Search, "搜索"),
-            GlassTab(LIcon.HighlightPen, "高亮"),
-            GlassTab(LIcon.Pencil, "墨迹"),
-            GlassTab(LIcon.Note, "批注"),
-            GlassTab(LIcon.ChevronRight, "下一页")
-        )
+    val colors = LocalColors.current
+    val tap: (() -> Unit) -> Unit = { action ->
+        if (haptic) {
+            haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+        }
+        action()
     }
 
-    // 哪一项算「当前选中」：面板打开优先，其次编辑工具
-    val selectedIndex = when {
-        tocOpen -> 1
-        bookmarked -> 2
-        searchActive -> 3
-        tool == EditorTool.HIGHLIGHT -> 4
-        tool == EditorTool.INK -> 5
-        tool == EditorTool.NOTE -> 6
-        else -> -1
-    }
-
-    Box(
+    // v1.8.2：按用户指定的图二形态重做 ——
+    //
+    //   ╭──────────────────────────────────────────╮
+    //   │  ‹ 上一页      1 / 399      下一页 ›  ✕ 关闭 │  56dp 主胶囊
+    //   ╰──────────────────────────────────────────╯
+    //        [ 目录 书签 搜索 高亮 墨迹 批注 ]          40dp 工具条
+    //
+    // 旧版把 8 个功能塞进一条 8 格玻璃滑块，每格不到 40dp 且全是纯图标，
+    // 用户截图反馈「按钮太小根本看不清、整条错位」。新版把**翻页/关闭**
+    // 做成带文字的大按钮（44dp 触控目标），工具收进上方小工具条。
+    Column(
         Modifier
             .fillMaxWidth()
             .padding(
                 start = LSpace.pageHorizontal,
                 end = LSpace.pageHorizontal,
-                bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 20.dp
+                bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 16.dp
             ),
-        contentAlignment = Alignment.Center
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        GlassTabBar(
-            items = tabs,
-            selectedIndex = selectedIndex.coerceAtLeast(0),
-            compact = true,
-            followSelection = selectedIndex >= 0,
-            onSelect = { i ->
-                if (haptic) {
-                    haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+        // ---- 主胶囊：上一页 / 页码 / 下一页 / 关闭 ----
+        LiquidGlass(
+            Modifier.fillMaxWidth().height(56.dp),
+            shape = pillShape(56f)
+        ) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                DockAction(
+                    icon = LIcon.ChevronLeft,
+                    label = "上一页",
+                    iconFirst = true,
+                    onClick = { tap(onPrev) },
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "$page / $total",
+                    style = LType.number(17f.sp(), androidx.compose.ui.text.font.FontWeight.SemiBold),
+                    color = colors.text,
+                    maxLines = 1
+                )
+                DockAction(
+                    icon = LIcon.ChevronRight,
+                    label = "下一页",
+                    iconFirst = false,
+                    onClick = { tap(onNext) },
+                    modifier = Modifier.weight(1f)
+                )
+                DockAction(
+                    icon = LIcon.Xmark,
+                    label = "关闭",
+                    iconFirst = true,
+                    onClick = { tap(onClose) },
+                    modifier = Modifier.width(72.dp)
+                )
+            }
+        }
+
+        // ---- 工具条：目录 / 书签 / 搜索 / 高亮 / 墨迹 / 批注 ----
+        LiquidGlass(
+            Modifier.height(44.dp),
+            shape = pillShape(44f)
+        ) {
+            Row(
+                Modifier
+                    .height(44.dp)
+                    .padding(horizontal = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                DockBtn(LIcon.List, "目录", tocOpen, haptic, 36.dp) { tap(onToc) }
+                DockBtn(LIcon.Bookmark, "书签", bookmarked, haptic, 36.dp) { tap(onBookmarks) }
+                DockBtn(LIcon.Search, "搜索", searchActive, haptic, 36.dp) { tap(onSearch) }
+                DockBtn(LIcon.HighlightPen, "高亮", tool == EditorTool.HIGHLIGHT, haptic, 36.dp) {
+                    tap { onTool(EditorTool.HIGHLIGHT) }
                 }
-                when (i) {
-                    0 -> onPrev()
-                    1 -> onToc()
-                    2 -> onBookmarks()
-                    3 -> onSearch()
-                    4 -> onTool(EditorTool.HIGHLIGHT)
-                    5 -> onTool(EditorTool.INK)
-                    6 -> onTool(EditorTool.NOTE)
-                    7 -> onNext()
+                DockBtn(LIcon.Pencil, "墨迹", tool == EditorTool.INK, haptic, 36.dp) {
+                    tap { onTool(EditorTool.INK) }
                 }
-            },
-            modifier = Modifier.width(LSpace.dockHeight * 8 + 16.dp),
-            height = LSpace.dockHeight
-        )
+                DockBtn(LIcon.Note, "批注", tool == EditorTool.NOTE, haptic, 36.dp) {
+                    tap { onTool(EditorTool.NOTE) }
+                }
+            }
+        }
+    }
+}
+
+/** 图二形态的大号动作按钮：图标 + 文字，44dp 触控目标 */
+@Composable
+private fun DockAction(
+    icon: LIcon,
+    label: String,
+    iconFirst: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = LocalColors.current
+    Row(
+        modifier
+            .height(44.dp)
+            .clip(Shapes2.M)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick
+            )
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        if (iconFirst) {
+            LIconView(icon, size = 20.dp, color = colors.text, strokeWidth = 1.9.dp)
+            Spacer(Modifier.width(6.dp))
+        }
+        Text(label, style = LType.Caption, color = colors.text, maxLines = 1)
+        if (!iconFirst) {
+            Spacer(Modifier.width(6.dp))
+            LIconView(icon, size = 20.dp, color = colors.text, strokeWidth = 1.9.dp)
+        }
     }
 }
 

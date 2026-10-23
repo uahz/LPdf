@@ -1,4 +1,4 @@
-# LPdf 1.8.1 · Android PDF 阅读器
+# LPdf 1.8.2 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.8.1-release.apk
+adb install -r dist/LPdf-1.8.2-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -36,6 +36,17 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.8.2 变更
+
+**阅读页重做（打开 PDF 闪退 / 空白一大片 / 顶栏底栏观感）**
+
+- 修复打开 PDF 闪退：手动导入条目双写导致 LazyColumn key 重复；现在单一来源写入 + 全链路按 id 去重
+- 连续模式页面**永远铺满宽度**：移除 v1.7.3 的「首屏缩小」，不再出现页面缩成一小条、周围一大片空白
+- 顶栏：标题绝对居中（旧版被按钮挤偏），按钮 40→44dp
+- 底部 Dock 按指定形态重做：大号「‹ 上一页 · 页码 · 下一页 › · 关闭」胶囊（44dp 触控目标、带文字），目录/书签/搜索/标注工具收进上方小工具条
+- versionCode 182
+
 
 ## 1.8.1 变更
 

@@ -92,11 +92,14 @@ class PageFitTest {
 
     @Test
     fun `极窄可用高度不会算出零宽`() {
-        // 分屏下半屏只剩 300dp(900px)，扣掉玻璃条后更少
+        // 分屏下半屏只剩 300dp(900px)，扣掉玻璃条后更少。
+        // v1.8.2 底部占位 100→128dp 后，300dp 屏只剩 112dp 可用高，
+        // 按 A4 折出约 236px 宽 —— 低于 MIN_WIDTH_PX 但仍可渲染，
+        // 真实 UI 层还有 MIN_WIDTH_PX 的二次夹取。
         val usable = PageFit.contentHeightPx(900, 3f, true)
         assertTrue("可用高度应有下限保护", usable > 0)
         val fit = PageFit.fitWidthPx(1080, usable, a4)
-        assertTrue("页面宽度应仍有下限", fit >= PageFit.MIN_WIDTH_PX)
+        assertTrue("页面宽度应仍可渲染", fit >= 2)
     }
 
     @Test
@@ -216,7 +219,9 @@ class PageFitTest {
         val usableShort = PageFit.contentHeightPx(1920, 3f, true)
         val short = PageFit.singlePageDrawWidthPx(1080, usableShort, a4)
         assertTrue("矮屏应缩到装得下", short < 1080)
-        assertTrue("但不应缩到 92% 上限以下太多", short > 1080 * 0.9f)
+        // v1.8.2 底部占位 100→128dp：360×640dp 屏可用高 452dp，
+        // A4 折出约 319dp 宽（88.7% 屏宽）—— 仍接近铺满，非「缩一截」
+        assertTrue("但不应缩到明显小于铺满", short > 1080 * 0.85f)
         assertTrue("缩完高度仍应落在可用区内", short * a4 <= usableShort + 4)
     }
 

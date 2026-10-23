@@ -113,11 +113,13 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             container.prefs.pinnedUris.collect { p ->
                 pinnedUris.value = p
-                // 新导入落库时立即补进当前列表，不需要等下一次全量扫描
+                // 新导入落库时立即补进当前列表，不需要等下一次全量扫描。
+                // 必须按 id 去重：importFromUri 与这里都在往 items 里塞同一个 uri，
+                // 双写会产出重复条目，LazyColumn 的 key 冲突直接闪退（v1.8.1 崩溃报告）。
                 val known = _state.value.items.mapTo(HashSet()) { it.id }
                 p.filter { it !in known }.forEach { uri ->
                     buildPinnedItem(uri)?.let { item ->
-                        _state.value = _state.value.copy(items = listOf(item) + _state.value.items)
+                        _state.value = _state.value.copy(items = dedupe(listOf(item) + _state.value.items))
                         enrich(item)
                     }
                 }
@@ -481,8 +483,30 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
                 container.resolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }.isSuccess
             // 旧版只写内存 state —— 重启后 scan() 找不到这个 uri，条目凭空消失。
-            // 现在落库，scan 时从 pinnedUris 合并回来（v1.8.1 修复「导入没有记录」）
-            if (persisted) container.prefs.addPinnedUri(uri.toString())
+            // 现在落库，scan 时从 pinnedUris 合并回来（v1.8.1 修复「导入没有记录」）。
+            // 落库成功时**不再手动插条目**：pinnedUris 的 collector 会补进来，
+            // 两边都插会产出重复 id，LazyColumn key 冲突直接闪退。
+            if (persisted) {
+                container.prefs.addPinnedUri(uri.toString())
+            } else {
+                // 无长期授权的不落库（重启后也打不开），只在本次会话手动插一条
+                val fallback = PdfItem(
+                    id = uri.toString(),
+                    uri = uri.toString(),
+                    displayName = name,
+                    sizeBytes = container.mediaStore.sizeOf(uri),
+                    lastModified = System.currentTimeMillis(),
+                    source = PdfSource.SAF_DIR,
+                    persistedUriPermission = false
+                )
+                _state.value = _state.value.copy(
+                    progressText = null,
+                    items = dedupe(listOf(fallback) + _state.value.items)
+                )
+                enrich(fallback)
+                requestOpen(fallback, onReady)
+                return@launch
+            }
             val item = PdfItem(
                 id = uri.toString(),
                 uri = uri.toString(),
@@ -490,14 +514,14 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
                 sizeBytes = container.mediaStore.sizeOf(uri),
                 lastModified = System.currentTimeMillis(),
                 source = PdfSource.SAF_DIR,
-                persistedUriPermission = persisted
+                persistedUriPermission = true
             )
-            _state.value = _state.value.copy(
-                progressText = null,
-                items = listOf(item) + _state.value.items
-            )
-            enrich(item)
-            requestOpen(item, onReady)
+            _state.value = _state.value.copy(progressText = null)
+            // 条目由 pinnedUris collector 补入（可能已有——比如 scan 刚好扫到了），
+            // 这里只保证打开请求，不再写 items
+            val existing = _state.value.items.firstOrNull { it.id == item.id }
+            enrich(existing ?: item)
+            requestOpen(existing ?: item, onReady)
         }
     }
 
@@ -554,13 +578,24 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     private fun sortList(list: List<PdfItem>, order: SortOrder = _state.value.sortOrder): List<PdfItem> {
-        val visible = list.filterNot { hidden.value.contains(it.id) }
+        val visible = dedupe(list).filterNot { hidden.value.contains(it.id) }
         return when (order) {
             SortOrder.MODIFIED_DESC -> visible.sortedByDescending { it.lastModified }
             SortOrder.NAME_ASC -> visible.sortedBy { it.displayName.lowercase() }
             SortOrder.SIZE_DESC -> visible.sortedByDescending { it.sizeBytes }
             SortOrder.RECENT -> visible
         }
+    }
+
+    /**
+     * 按 id 去重（保留首个）。LazyColumn 用 item.id 当 key，重复 key
+     * 会在渲染帧直接抛 IllegalArgumentException 闪退（v1.8.1 崩溃报告）。
+     * 扫描、落库回调、手动插入三条路径都可能写入同一条目，这里统一兜底。
+     */
+    private fun dedupe(list: List<PdfItem>): List<PdfItem> {
+        if (list.size < 2) return list
+        val seen = HashSet<String>(list.size)
+        return list.filter { seen.add(it.id) }
     }
 
     companion object {

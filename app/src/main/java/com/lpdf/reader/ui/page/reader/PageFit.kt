@@ -57,7 +57,7 @@ object PageFit {
      * 这两个常量就是「玻璃条会盖住多少」的唯一事实来源。
      */
     const val TOP_CHROME_DP = 60f
-    const val BOTTOM_CHROME_DP = 100f
+    const val BOTTOM_CHROME_DP = 128f
 
     /**
      * 单屏（单页模式）能用来放页面的高度。
