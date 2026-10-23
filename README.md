@@ -1,4 +1,4 @@
-# LPdf 1.8.0 · Android PDF 阅读器
+# LPdf 1.8.1 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.8.0-release.apk
+adb install -r dist/LPdf-1.8.1-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -36,6 +36,15 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.8.1 变更
+
+**底栏整体重写 + 导入记录修复**（用户截图反馈）。
+
+- 底栏重写为悬浮 Dock：选中指示器改用与 Tab 槽同一套算术定位（`x = index*itemWidth + 居中偏移`，垂直严格居中），彻底修复旧版玻璃滴「溢出底栏、压到相邻图标、文字悬在栏外」的错位
+- 修复「导入过的 PDF 没有记录」：手动导入（OpenDocument）的文件之前只写内存 state，重启即消失；现在持久化到 DataStore（`pinnedUris`），扫描时合并回列表，删除记录时同步移除
+- versionCode 181
+
 
 ## 1.8.0 变更
 

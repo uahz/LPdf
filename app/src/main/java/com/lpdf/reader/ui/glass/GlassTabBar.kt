@@ -35,7 +35,6 @@ import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
-import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
@@ -45,7 +44,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
-import com.kyant.backdrop.backdrops.rememberCombinedBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
@@ -59,54 +57,40 @@ import com.lpdf.reader.ui.theme.LocalColors
 import kotlin.math.roundToInt
 
 /**
- * iOS 26 液态玻璃底栏（v1.7.2 重做）。
+ * iOS 26 悬浮玻璃底栏（v1.8.1 整体重写）。
  *
  * ```
- *  ┌─────────────────────────────────────────┐  64dp 外筐
- *  │ ╭─────────────────────────────────────╮ │  4dp 内边距
- *  │ │  ⌂      ▦      ◉      ♪             │ │  56dp 内层
- *  │ │ 首页   文档   书签   发现            │ │
- *  │ ╰─────────────────────────────────────╯ │
- *  └─────────────────────────────────────────┘
- *      （选中项下方压出一滴玻璃）
+ *      ╭─────────────────────────────────────╮  ← 悬浮胶囊（左右留边、底部离导航条 12dp）
+ *      │  ⌂     ▦     ◉     ♪     ☀          │
+ *      │ 首页   文档   书签   发现   我的       │
+ *      ╰─────────────────────────────────────╯
+ *           （选中项：胶囊高亮块滑到该格正中）
  * ```
  *
- * ## v1.7.2 为什么要整条重写
+ * ## v1.8.1 为什么推倒重写
  *
- * 旧版是按「看起来差不多」猜的：常驻玻璃药丸 + 每项都挂文字 + 支持横向拖动。
- * 与 iOS 26 真机截图逐项对比后，有三处结构性错误：
+ * 旧版（v1.7.2）的选中指示器是一颗「玻璃滴」，它的定位公式有两处硬伤，
+ * 真机上表现就是用户截图里的**选中卡片溢出底栏、压到相邻图标、文字悬在栏外**：
  *
- * 1. **常驻药丸是错的**。iOS 26 的选中反馈是「按下时压出一滴玻璃」，
- *    松手即消散；选中态本身只有图标着色 + 微放大。常驻的一片实心药丸
- *    让整个底栏看起来像十年前的 TabLayout。
- * 2. **标签只给选中项**。iOS 的 tab bar 是纯图标，只有当前项显示文字。
- *    五项全挂文字，在 5 寸屏上直接糊成一片 —— 用户截图里的「文档」两个字
- *    直接压在设置页的正文上。
- * 3. **不接受横向拖动**。tab bar 不是滑块。拖动会让人以为可以连续切换，
- *    还会和系统边缘返回手势打架。
+ * 1. 垂直偏移写死 `TAB_LABEL_HEIGHT / 2`，滴的位置整体下坠，超出外筐；
+ * 2. 滴的尺寸（itemWidth - 12dp × innerHeight - 4dp）和文字槽的布局彼此独立计算，
+ *    任何一处取整误差都会让两者错位。
  *
- * ## 尺寸结构（对齐 Kyant0/LiquidBottomTabs）
+ * 新版把指示器改成**一个普通的胶囊色块**，用与 Tab 槽完全相同的算术定位：
+ * `x = index * itemWidth + (itemWidth - pillWidth) / 2`、垂直严格居中。
+ * 数值上不可能再溢出，也不再依赖 backdrop lens 的渲染结果——
+ * 玻璃折射只留给外筐本体，指示器用实色 + 描边，任何设备上都一致。
  *
- * | 层 | 高度 | 圆角 |
- * |---|---|---|
- * | 外筐 | 64dp | 32dp 胶囊 |
- * | 内层 | 56dp | 28dp 胶囊 |
+ * ## 悬浮形态
  *
- * ## 双层 backdrop 为什么必要
- *
- * 玻璃滴要折射的是**底栏自己**（图标与文字），不是底下的页面。
- * 所以底栏内部再录一层 layer backdrop，与外层页面的 backdrop 合成：
- * ```
- * combined = rememberCombinedBackdrop(pageBackdrop, tabBarLayerBackdrop)
- * ```
- * 只用一个 backdrop 时，玻璃滴下面直接透出页面内容，滴里空空如也。
+ * 宽度 = 屏宽 - 2 × pageHorizontal（调用方给），高度 64dp，
+ * 底部离系统导航条 12dp（TabDock 负责）——就是 iOS 26 的悬浮 tab bar。
  *
  * @param items 底栏项
  * @param selectedIndex 选中下标；-1 表示当前没有选中项
  * @param onSelect 点击回调
- * @param height 外筐高度；内层固定 = height - 8dp
+ * @param height 外筐高度
  * @param compact 紧凑模式：整条不显示文字（阅读页工具栏）
- * @param followSelection 指示器是否跟随选中项滑动
  */
 @Composable
 fun GlassTabBar(
@@ -124,35 +108,31 @@ fun GlassTabBar(
     val pageBackdrop = LocalLiquidGlassScope.current?.backdrop
 
     val itemCount = items.size.coerceAtLeast(1)
-    val barHeight = height
     val innerHeight = height - 8.dp
 
-    // 底栏自己的内容层：玻璃滴要在它**之上**采样，才能折射出图标与文字
-    val tabBarLayer = rememberGraphicsLayer()
+    // 底栏自己的内容层：外筐玻璃要折射出图标与文字
+    val tabBarLayer = rememberGraphicsLayerSafe()
     val tabBarBackdrop = rememberLayerBackdrop(tabBarLayer)
-    val combined = rememberCombinedBackdrop(pageBackdrop ?: tabBarBackdrop, tabBarBackdrop)
 
-    // 当前按下的项；-1 = 没有
+    // 指示器中心 x（px）。随选中项弹簧滑动 —— 直接跳会让「液态」感消失
+    val indicatorX = remember { Animatable(0f) }
     var pressedIndex by remember { mutableStateOf(-1) }
-    // 玻璃滴的「鼓起程度」：0 = 静息，1 = 按到底
-    val progress = remember { Animatable(0f) }
+    val pressProgress = remember { Animatable(0f) }
 
     BoxWithConstraints(
         modifier
             .fillMaxWidth()
-            .height(barHeight)
+            .height(height)
     ) {
         val totalWidthPx = with(density) { maxWidth.toPx() }
         val itemWidthPx = totalWidthPx / itemCount
         val itemWidthDp = maxWidth / itemCount
 
-        // 指示器中心 x（px）。随选中项弹簧滑动 —— 直接跳会让「液态」感消失
-        val indicatorX = remember { Animatable(0f) }
         LaunchedEffect(selectedIndex, itemWidthPx, followSelection) {
             if (!followSelection || selectedIndex < 0) return@LaunchedEffect
             val target = (selectedIndex + 0.5f) * itemWidthPx
             if (indicatorX.value == 0f) {
-                // 首帧直接落位，否则开屏会看到一滴玻璃从左边缘滑到当前项
+                // 首帧直接落位，否则开屏会看到高亮块从左边缘滑到当前项
                 indicatorX.snapTo(target)
             } else {
                 indicatorX.animateTo(
@@ -162,14 +142,29 @@ fun GlassTabBar(
             }
         }
         LaunchedEffect(pressedIndex) {
-            progress.animateTo(
+            pressProgress.animateTo(
                 if (pressedIndex >= 0) 1f else 0f,
                 tween(if (pressedIndex >= 0) 140 else 280)
             )
         }
 
-        val outerShape = Shapes2.pill(barHeight.value)
-        val innerShape = Shapes2.pill(innerHeight.value)
+        val outerShape = Shapes2.pill(height.value)
+
+        // ---------------- 指示器几何（与 Tab 槽同一套算术，保证严格对齐） ----------------
+        //
+        // 槽：x ∈ [i*w, (i+1)*w]，垂直占满内层。
+        // 指示器：宽 itemWidth - 12dp，高 innerHeight - 8dp，在槽内水平居中、垂直居中。
+        // 没有第二个坐标系、没有写死的偏移 —— 不可能再溢出。
+        val pillWidth = itemWidthDp - 12.dp
+        val pillHeight = innerHeight - 8.dp
+        val pillCenterX = when {
+            pressedIndex >= 0 && !followSelection -> (pressedIndex + 0.5f) * itemWidthPx
+            indicatorX.value > 0f -> indicatorX.value
+            selectedIndex >= 0 -> (selectedIndex + 0.5f) * itemWidthPx
+            else -> 0f
+        }
+        val pillLeft = pillCenterX - with(density) { pillWidth.toPx() } / 2f
+        val pillTop = with(density) { ((height - pillHeight) / 2f).toPx() }
 
         Box(
             Modifier
@@ -179,14 +174,7 @@ fun GlassTabBar(
                     drawLayer(tabBarLayer)
                 }
         ) {
-            // ---------------- 外筐：整条玻璃底板 ----------------
-            //
-            // 视觉层次自上而下：
-            //   ① drawBackdrop：vibrancy + blur + 边缘 lens（库负责）
-            //   ② onDrawSurface：半透明底色 —— 这一层是「内容不再透过来」的关键。
-            //      旧版只在 drawBehind 里叠 12% + 20% 白，在深色底上几乎等于透明，
-            //      设置页的正文会原样从底栏里透出来（用户截图）。
-            //   ③ 边缘描边：极细亮上缘 + 暗下缘，给出玻璃的厚度
+            // ---------------- 外筐：整条玻璃底板（悬浮胶囊） ----------------
             Box(
                 Modifier
                     .fillMaxSize()
@@ -200,8 +188,8 @@ fun GlassTabBar(
                                     runCatching { blur(with(density) { 12.dp.toPx() }) }
                                     runCatching {
                                         lens(
-                                            with(density) { 24.dp.toPx() },
-                                            with(density) { 24.dp.toPx() },
+                                            with(density) { 20.dp.toPx() },
+                                            with(density) { 20.dp.toPx() },
                                             /* depthEffect = */ true,
                                             /* chromaticAberration = */ true
                                         )
@@ -235,7 +223,6 @@ fun GlassTabBar(
                     )
                     .drawWithContent {
                         drawContent()
-                        // 外圈描边：亮上缘（从 40% 白渐变收尾）+ 极淡下缘暗线
                         drawOutline(
                             outline = outerShape.createOutline(size, layoutDirection, this),
                             color = if (colors.isDark) Color.White.copy(alpha = 0.14f)
@@ -245,24 +232,42 @@ fun GlassTabBar(
                     }
             )
 
-            // ---------------- 内层轮廓 ----------------
-            // iOS 的底栏其实是「两片玻璃叠着」：外圈负责与页面接壤的折射，
-            // 内圈负责内容区的亮度整理。少这一层会显得平板。
-            Box(
-                Modifier
-                    .padding(4.dp)
-                    .fillMaxSize()
-                    .drawWithContent {
-                        drawContent()
-                        drawOutline(
-                            outline = innerShape.createOutline(size, layoutDirection, this),
-                            color = if (colors.isDark) Color.White.copy(alpha = 0.05f)
-                            else Color.White.copy(alpha = 0.30f),
-                            style = Stroke(width = 1.dp.toPx())
-                        )
-                    }
-            )
+            // ---------------- 选中指示器（胶囊高亮块） ----------------
+            //
+            // 画在图标层之下，颜色用 accent 的淡色 + 极细描边。
+            // 跟随 indicatorX 弹簧滑动；按压其它项时按压缩放反馈。
+            if (pillCenterX > 0f) {
+                val scale = lerp(1f, 0.94f, pressProgress.value)
+                Box(
+                    Modifier
+                        .offset { IntOffset(pillLeft.roundToInt(), pillTop.roundToInt()) }
+                        .width(pillWidth)
+                        .height(pillHeight)
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            alpha = 0.6f + 0.4f * (1f - pressProgress.value)
+                        }
+                        .drawWithContent {
+                            val r = pillHeight.toPx() / 2f
+                            drawRoundRect(
+                                color = colors.accent.copy(
+                                    alpha = if (colors.isDark) 0.22f else 0.14f
+                                ),
+                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r)
+                            )
+                            drawRoundRect(
+                                color = colors.accent.copy(
+                                    alpha = if (colors.isDark) 0.35f else 0.28f
+                                ),
+                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r),
+                                style = Stroke(width = 1.dp.toPx())
+                            )
+                        }
+                )
+            }
 
+            // ---------------- Tab 项 ----------------
             Row(
                 Modifier
                     .fillMaxSize()
@@ -272,7 +277,7 @@ fun GlassTabBar(
                     TabItem(
                         item = item,
                         selected = index == selectedIndex,
-                        // iOS：只有选中项显示文字；紧凑模式一个都不显示
+                        // iOS 26：选中项显示文字（在栏内、图标下方），其余纯图标
                         showLabel = !compact && index == selectedIndex,
                         onPressChange = { down -> pressedIndex = if (down) index else -1 },
                         onClick = { onSelect(index) },
@@ -282,74 +287,6 @@ fun GlassTabBar(
                     )
                 }
             }
-
-            // ---------------- 玻璃滴 ----------------
-            //
-            // 只在按压时真正「鼓」起来；静息时以 0.35 的弱透镜存在，
-            // 让选中项有一层极淡的玻璃轮廓 —— 这是 iOS 26 的 Resting 形态。
-            val active = when {
-                pressedIndex >= 0 -> pressedIndex
-                followSelection && selectedIndex in items.indices -> selectedIndex
-                else -> -1
-            }
-            if (active >= 0 && capability.level != GlassLevel.PLAIN) {
-                // 跟随时用 indicatorX（滑动动画），按压时用按下的位置
-                val centerX = when {
-                    pressedIndex >= 0 && !followSelection -> (pressedIndex + 0.5f) * itemWidthPx
-                    indicatorX.value > 0f -> indicatorX.value
-                    else -> (active + 0.5f) * itemWidthPx
-                }
-                val dropWidth = itemWidthDp - 12.dp
-                Box(
-                    Modifier
-                        .offset {
-                            IntOffset(
-                                (centerX - dropWidth.toPx() / 2f).roundToInt(),
-                                TAB_LABEL_HEIGHT.roundToPx() / 2
-                            )
-                        }
-                        .width(dropWidth)
-                        .height(innerHeight - 4.dp)
-                        .drawBackdrop(
-                            backdrop = combined,
-                            shape = { Shapes2.pill((innerHeight.value - 4f) / 2f) },
-                            effects = {
-                                val grow = lerp(0.35f, 1f, progress.value)
-                                runCatching {
-                                    lens(
-                                        with(density) { 16.dp.toPx() * grow },
-                                        with(density) { 14.dp.toPx() * grow },
-                                        /* depthEffect = */ true,
-                                        /* chromaticAberration = */ true
-                                    )
-                                }
-                            },
-                            highlight = {
-                                Highlight(
-                                    width = 1.2.dp,
-                                    blurRadius = 4.dp,
-                                    alpha = 0.12f + 0.5f * progress.value,
-                                    style = HighlightStyle.Default(
-                                        intensity = 0.30f + 0.5f * progress.value,
-                                        angle = 135f,
-                                        falloff = 0.55f
-                                    )
-                                )
-                            },
-                            onDrawSurface = {
-                                drawRect(
-                                    Color.White.copy(
-                                        alpha = if (colors.isDark) {
-                                            0.015f + 0.09f * progress.value
-                                        } else {
-                                            0.04f + 0.20f * progress.value
-                                        }
-                                    )
-                                )
-                            }
-                        )
-                )
-            }
         }
     }
 }
@@ -357,16 +294,11 @@ fun GlassTabBar(
 /**
  * 底栏「材料」底色。
  *
- * 这不是随便挑的灰，而是 iOS 26 液态玻璃在两种模式下的等效不透明度：
- * - 浅色：25% 白。叠在 blur(12dp) + vibrancy 之上，底层文字被糊成色块，
- *   图标对比度仍 ≥ 4.5:1。
- * - 深色：55% 黑。深色底几乎不散射光，需要更多吸收层才能压住白底 PDF 的透出。
+ * 浅色：25% 白（叠在 blur 之上，图标对比度 ≥ 4.5:1）；
+ * 深色：55% 黑（深色底几乎不散射光，需要更多吸收层压住白底 PDF 的透出）。
  */
 private fun materialTint(dark: Boolean): Color =
     if (dark) Color.Black.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.25f)
-
-/** 选中项文字标签的行高。固定住，保证图标在两种状态下垂直位置一致 */
-private val TAB_LABEL_HEIGHT = 12.dp
 
 /** 底栏一项的数据 */
 data class GlassTab(
@@ -381,8 +313,9 @@ data class GlassTab(
 /**
  * 单个 Tab 项。
  *
- * 交互只保留 iOS tab bar 真实存在的反馈：按下高光 + 0.92 微缩，
- * 松手欠阻尼回弹（略微过冲）。不拦截拖拽 —— 横向滑动交还给系统手势。
+ * 图标与文字都严格排布在**本槽内**：Column 居中，图标占 weight(1f)，
+ * 文字槽固定 12dp（不显示时用等高 Spacer 占位，两种状态重心一致）。
+ * 交互只保留 iOS 真实存在的反馈：按压缩放 + 选中微放大。
  */
 @Composable
 private fun TabItem(
@@ -405,7 +338,7 @@ private fun TabItem(
             spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMedium)
         )
     }
-    // 选中态：图标轻微放大（1.0 → 1.06）+ 着色。没有常驻背景块。
+    // 选中态：图标轻微放大 + 着色
     val emphasis = remember { Animatable(if (selected) 1.06f else 1f) }
     LaunchedEffect(selected) {
         emphasis.animateTo(
@@ -458,9 +391,6 @@ private fun TabItem(
             return@Column
         }
 
-        // 图标区高度改用 weight 分配：外层 Column 已经居中（verticalArrangement
-        // = Center），固定高度会让「有标签 / 没标签」两种状态的重心不同，
-        // 切换 Tab 时整排图标会上下跳一下。
         Box(
             Modifier
                 .weight(1f)
@@ -469,8 +399,7 @@ private fun TabItem(
         ) {
             LIconView(
                 item.icon,
-                // 纯图标形态下，文字不再是「看得见的信息」，
-                // 必须挂到无障碍描述上，否则读屏只能念出「按钮」。
+                // 纯图标形态下，文字挂到无障碍描述上，否则读屏只能念出「按钮」
                 modifier = Modifier.semantics { contentDescription = item.label },
                 size = if (selected) 24.dp else 23.dp,
                 color = tint,
@@ -485,10 +414,14 @@ private fun TabItem(
                 color = colors.accent,
                 textAlign = TextAlign.Center,
                 maxLines = 1,
-                modifier = Modifier.height(TAB_LABEL_HEIGHT)
+                modifier = Modifier.height(12.dp)
             )
         } else {
-            Spacer(Modifier.height(TAB_LABEL_HEIGHT))
+            Spacer(Modifier.height(12.dp))
         }
     }
 }
+
+/** rememberGraphicsLayer 在无玻璃能力的设备上可能不可用，这里兜底 */
+@Composable
+private fun rememberGraphicsLayerSafe() = androidx.compose.ui.graphics.rememberGraphicsLayer()

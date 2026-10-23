@@ -91,6 +91,8 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
     private val thumbSemaphore = Semaphore(2)
     private val hidden = MutableStateFlow<Set<String>>(emptySet())
     private val trees = MutableStateFlow<Set<String>>(emptySet())
+    /** 手动导入（OpenDocument）的单文件 uri，重启后仍要出现在列表里 */
+    private val pinnedUris = MutableStateFlow<Set<String>>(emptySet())
 
     /** enrich 已排队集合，避免重复渲染同一文件 */
     private val enrichQueued = HashSet<String>()
@@ -106,6 +108,19 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
             container.prefs.safTrees.collect { t ->
                 trees.value = t
                 _state.value = _state.value.copy(treeCount = t.size)
+            }
+        }
+        viewModelScope.launch {
+            container.prefs.pinnedUris.collect { p ->
+                pinnedUris.value = p
+                // 新导入落库时立即补进当前列表，不需要等下一次全量扫描
+                val known = _state.value.items.mapTo(HashSet()) { it.id }
+                p.filter { it !in known }.forEach { uri ->
+                    buildPinnedItem(uri)?.let { item ->
+                        _state.value = _state.value.copy(items = listOf(item) + _state.value.items)
+                        enrich(item)
+                    }
+                }
             }
         }
         viewModelScope.launch {
@@ -145,6 +160,11 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
                 }
                 // 在线导入的本地文件
                 container.linkImporter.listImported().forEach { collected[it.id] = it }
+                // 手动导入的单文件（OpenDocument）：持久化在 prefs 里，
+                // 不属于任何被扫描的数据源，必须在这里合并回来（v1.8.1 修复）
+                pinnedUris.value.forEach { uri ->
+                    buildPinnedItem(uri)?.let { collected[it.id] = it }
+                }
                 _state.value = _state.value.copy(permissionDenied = false)
             } catch (e: SecurityException) {
                 _state.value = _state.value.copy(permissionDenied = true)
@@ -219,6 +239,29 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
     override fun onCleared() {
         prewarmer.cancel()
         super.onCleared()
+    }
+
+    /**
+     * 从持久化的 uri 构建列表条目（v1.8.1）。
+     *
+     * 手动导入的文件读取权限是 takePersistableUriPermission 给的长期授权，
+     * 重启后 uri 仍然可读；若授权被系统回收或文件被删，返回 null（不显示假条目）。
+     */
+    private fun buildPinnedItem(uri: String): PdfItem? {
+        val parsed = runCatching { Uri.parse(uri) }.getOrNull() ?: return null
+        val readable = runCatching {
+            container.resolver().openInputStream(parsed)?.use { it.read() != -1 } == true
+        }.getOrDefault(false)
+        if (!readable) return null
+        return PdfItem(
+            id = uri,
+            uri = uri,
+            displayName = container.mediaStore.displayNameOf(parsed) ?: "导入文档.pdf",
+            sizeBytes = container.mediaStore.sizeOf(parsed),
+            lastModified = System.currentTimeMillis(),
+            source = PdfSource.SAF_DIR,
+            persistedUriPermission = true
+        )
     }
 
     private fun enrich(item: PdfItem) {
@@ -376,6 +419,10 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
     fun forget(item: PdfItem) {
         viewModelScope.launch {
             hide(item)
+            // 手动导入的条目也要从持久化集合里移除，否则下次扫描又「复活」
+            if (item.source == PdfSource.SAF_DIR && !item.uri.startsWith("content")) {
+                runCatching { container.prefs.removePinnedUri(item.uri) }
+            }
             val key = container.thumbnails.cacheKey(item.id, item.lastModified)
             container.thumbnails.file(key).delete()
             if (item.source == PdfSource.LINK_IMPORT) container.linkImporter.deleteImported(item.uri)
@@ -433,6 +480,9 @@ class ListViewModel(private val container: AppContainer) : ViewModel() {
             val persisted = runCatching {
                 container.resolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }.isSuccess
+            // 旧版只写内存 state —— 重启后 scan() 找不到这个 uri，条目凭空消失。
+            // 现在落库，scan 时从 pinnedUris 合并回来（v1.8.1 修复「导入没有记录」）
+            if (persisted) container.prefs.addPinnedUri(uri.toString())
             val item = PdfItem(
                 id = uri.toString(),
                 uri = uri.toString(),

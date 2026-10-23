@@ -141,6 +141,7 @@ class PrefsRepository(private val context: Context) {
         val listFilter = stringPreferencesKey("list_filter")
         val hiddenIds = stringSetPreferencesKey("hidden_ids")
         val safTrees = stringSetPreferencesKey("saf_trees")
+        val pinnedUris = stringSetPreferencesKey("pinned_uris")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { it.toSettings() }
@@ -221,6 +222,20 @@ class PrefsRepository(private val context: Context) {
     suspend fun unhideAll() = context.dataStore.edit { it[Keys.hiddenIds] = emptySet() }
     suspend fun addSafTree(uri: String) = context.dataStore.edit { it[Keys.safTrees] = (it[Keys.safTrees] ?: emptySet()) + uri }
     suspend fun removeSafTree(uri: String) = context.dataStore.edit { it[Keys.safTrees] = (it[Keys.safTrees] ?: emptySet()) - uri }
+
+    // ---- 手动导入的单文件（v1.8.1） ----
+    //
+    // OpenDocument 选进来的文件不在任何被扫描的数据源里（MediaStore 可能根本没有，
+    // 也不属于任何 SAF 目录），不持久化的话重启就「凭空消失」—— 这正是
+    // 「导入过的 PDF 没有记录」的根因。存 uri 集合，扫描时合并回列表。
+
+    val pinnedUris: Flow<Set<String>> = context.dataStore.data.map { it[Keys.pinnedUris] ?: emptySet() }
+
+    suspend fun addPinnedUri(uri: String) =
+        context.dataStore.edit { it[Keys.pinnedUris] = (it[Keys.pinnedUris] ?: emptySet()) + uri }
+
+    suspend fun removePinnedUri(uri: String) =
+        context.dataStore.edit { it[Keys.pinnedUris] = (it[Keys.pinnedUris] ?: emptySet()) - uri }
 
     // ---- 阅读进度（每文件） ----
 
