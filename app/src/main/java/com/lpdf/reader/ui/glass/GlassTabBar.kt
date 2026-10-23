@@ -155,13 +155,12 @@ fun GlassTabBar(
         // 槽：x ∈ [i*w, (i+1)*w]，垂直占满内层。
         // 指示器：宽 itemWidth - 12dp，高 innerHeight - 8dp，在槽内水平居中、垂直居中。
         // 没有第二个坐标系、没有写死的偏移 —— 不可能再溢出。
-        // v1.8.4：指示器改回**纯填充**淡色胶囊，去掉 1dp 描边。
-        // 用户反馈描边高亮「生硬」（截图里是一圈扎眼的蓝框）——
-        // iOS 26 的选中态就是一层柔和的色块，没有描边。
-        // 同时加大胶囊（itemWidth-8dp × innerHeight-4dp），把选中项的
-        // 图标+文字完整包住，避免「文字挂在色块外面」的割裂感。
-        val pillWidth = itemWidthDp - 8.dp
-        val pillHeight = innerHeight - 4.dp
+        // v1.8.6：胶囊收敛为「刚好包住图标+文字」的紧凑尺寸。
+        // v1.8.4 放大到 itemWidth-8dp × innerHeight-4dp 后，5 个 Tab 的槽宽
+        // 本来就 ~70dp，胶囊几乎占满整槽 —— 真机上是一颗压到相邻图标的大椭圆。
+        // 现在宽 itemWidth-22dp、高 44dp，只包住内容本身。
+        val pillWidth = itemWidthDp - 22.dp
+        val pillHeight = 44.dp
         val pillCenterX = when {
             pressedIndex >= 0 && !followSelection -> (pressedIndex + 0.5f) * itemWidthPx
             indicatorX.value > 0f -> indicatorX.value
@@ -390,9 +389,7 @@ private fun TabItem(
         }
 
         Box(
-            Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            Modifier.fillMaxWidth(),
             contentAlignment = Alignment.Center
         ) {
             LIconView(
@@ -405,12 +402,12 @@ private fun TabItem(
             )
         }
 
-        // v1.8.5：文字**始终占位**，用透明度切换显隐。
-        // 旧实现「选中才挂 Text + 固定 12/14dp 槽」有两个坑：
-        // ① 大系统字体下槽高装不下，基线被压出槽底（截图里「首页」贴边溢出）；
-        // ② 显示/隐藏两态的图标重心不一致，切换时图标会跳。
-        // 现在文字按自然高度排版（不再写死槽高），未选中时 alpha=0 占位，
-        // 布局恒定、永不溢出、重心稳定。
+        Spacer(Modifier.height(2.dp))
+
+        // v1.8.6：文字始终占位（alpha 切换），且**整组图标+文字垂直居中**。
+        // 旧版图标区 weight(1f) 拉满高度、文字落到槽底 —— 文字永远贴着栏底边。
+        // 现在不拉伸，icon+2dp+文字作为一组居中；未选中时文字透明占位，
+        // 所有 Tab 的图标位置恒定，选中时整组也不跳动。
         Text(
             item.label,
             style = LType.Micro,

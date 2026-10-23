@@ -1,4 +1,4 @@
-# LPdf 1.8.5 · Android PDF 阅读器
+# LPdf 1.8.6 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.8.5-release.apk
+adb install -r dist/LPdf-1.8.6-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -36,6 +36,16 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.8.6 变更
+
+**主底栏选中胶囊收敛 + 阅读页玻璃加实**
+
+- 主底栏选中高亮从「几乎占满整槽的大椭圆」收敛为刚好包住图标+文字的紧凑胶囊（宽 itemWidth-22dp × 高 44dp），不再压到相邻图标
+- Tab 文字随图标+文字整组垂直居中，不再贴着栏底边；未选中时透明占位，图标位置恒定
+- 阅读页顶栏与底部 Dock 的玻璃霜化加实（frostAlpha 0.78）：书页正文不再透过玻璃与按钮文字混叠
+- versionCode 186
+
 
 ## 1.8.5 变更
 

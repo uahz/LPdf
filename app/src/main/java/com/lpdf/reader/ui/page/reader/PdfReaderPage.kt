@@ -1232,7 +1232,8 @@ private fun ReaderTopBar(
     ) {
         LiquidGlass(
             Modifier.fillMaxWidth().height(56.dp),
-            shape = pillShape(56f)
+            shape = pillShape(56f),
+            frostAlpha = 0.78f
         ) {
             Box(
                 Modifier
@@ -1338,7 +1339,8 @@ private fun ReaderDock(
         // ---- 主胶囊：上一页 / 页码 / 下一页 / 关闭 ----
         LiquidGlass(
             Modifier.fillMaxWidth().height(56.dp),
-            shape = pillShape(56f)
+            shape = pillShape(56f),
+            frostAlpha = 0.78f
         ) {
             Row(
                 Modifier
@@ -1380,7 +1382,8 @@ private fun ReaderDock(
         // ---- 工具条：目录 / 书签 / 搜索 / 高亮 / 墨迹 / 批注 ----
         LiquidGlass(
             Modifier.height(44.dp),
-            shape = pillShape(44f)
+            shape = pillShape(44f),
+            frostAlpha = 0.78f
         ) {
             Row(
                 Modifier

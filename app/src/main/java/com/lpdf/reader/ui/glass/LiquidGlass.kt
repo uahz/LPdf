@@ -93,6 +93,13 @@ fun LiquidGlass(
     highlightTint: Float = 0.12f,
     /** 是否绘制边缘高光 */
     showHighlight: Boolean = true,
+    /**
+     * 覆盖霜化层透明度（null = 用全局 glassFrost）。
+     * v1.8.6：阅读页的顶栏/Dock 叠在正文上，默认霜化太薄 —— 书页文字
+     * 原样透上来和按钮文字混在一起（用户截图）。这类「悬在内容上的玻璃」
+     * 需要更实的底，由调用方按场景提高。
+     */
+    frostAlpha: Float? = null,
     /** 拖拽时的高光偏移（px），让光"跟着手走" */
     highlightOffset: Offset = Offset.Zero,
     /** 按压态：折射增强、高光更亮 */
@@ -183,7 +190,7 @@ fun LiquidGlass(
         // v1.5.0：霜化层从 55% 降到 20%。它的职责只是「不让 PDF 正文原样透上来」，
         // 不再是「靠盖白营造磨砂感」—— 那件事由 blur + colorControls 完成。
         .drawBehind {
-            drawRect(colors.glassFrost)
+            drawRect(if (frostAlpha != null) colors.glassFrost.copy(alpha = frostAlpha) else colors.glassFrost)
             drawRect(colors.glassBase)
         }
         .then(
