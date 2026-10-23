@@ -60,12 +60,16 @@ OkHttp 默认会跟随 https 跳 http。只在入口校验 `startsWith("https://
 - **路径前缀**：`deleteImported` 不再把 `imported_backup` 这类兄弟目录算进来
 - **pdfium 版本**：报告称内嵌 `1.3.0.1-motley` ≈ 2022 年快照。实测这是 pdfium 的**内部 API 号**，不是 Chromium 快照号 —— `2.0.3`（2026-07 发布）携带的 `libpdfium.so` 与 `1.0.35` 字节完全一致。升级仍排入 1.8.0，因为安全补丁无从从版本串判断
 
+### pdfium 升级（同版顺带）
+
+`pdfiumandroid 1.0.32 → 1.0.35`。1.0.35 内嵌的 `libpdfium.so` 与最新的 `2.0.3` **字节完全一致**（md5 `093ef7a4…`），等于用最小的改动拿到了最新构建的渲染内核；Kotlin API 完全兼容，`PdfiumEngine` 零改动。2.0.3 不采用：它要求 compileSdk 37，而 AGP 8.7.3 最高支持 35，且它带的 .so 与 1.0.35 一模一样，收益为零。APK 反而小了 0.72 MB。
+
 | 项 | 结果 |
 | --- | --- |
 | 单测 | **246 项，0 失败**（新增 17 项） |
 | Lint | **0 error / 8 warning** |
 | 包信息 | `versionCode=175` / `versionName=1.7.5` |
-| APK | 25,175,492 字节（24.01 MB，含 PDFBox） |
+| APK | 24,415,888 字节（23.29 MB，含 PDFBox + 新版 pdfium） |
 | 签名 | 与 1.1.0 以来一致，可覆盖升级 |
 
 ## 1.7.4 变更
