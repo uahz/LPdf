@@ -236,32 +236,32 @@ fun GlassTabBar(
                     }
             )
 
-            // ---------------- 选中指示器（胶囊高亮块） ----------------
+            // ---------------- 选中指示器（液态玻璃浮起胶囊） ----------------
             //
-            // 画在图标层之下，颜色用 accent 的淡色 + 极细描边。
+            // v1.8.8：从「accent 染色块」换成**真·液态玻璃胶囊** ——
+            // 用户要求 1:1 对齐 iOS 26：选中项是一块浮起的玻璃 pill，
+            // 有折射、边缘高光、厚度感，选中语义由图标/文字的 accent 着色表达
+            // （iOS 的 pill 本身无色）。
+            // 复用 LiquidGlass 组件：自动取最近的 LiquidGlassScope backdrop，
+            // 与外筐采样同一内容层，玻璃质感完全一致。
             // 跟随 indicatorX 弹簧滑动；按压其它项时按压缩放反馈。
             if (pillCenterX > 0f) {
                 val scale = lerp(1f, 0.94f, pressProgress.value)
-                Box(
-                    Modifier
+                LiquidGlass(
+                    modifier = Modifier
                         .offset { IntOffset(pillLeft.roundToInt(), pillTop.roundToInt()) }
                         .width(pillWidth)
                         .height(pillHeight)
                         .graphicsLayer {
                             scaleX = scale
                             scaleY = scale
-                            alpha = 0.6f + 0.4f * (1f - pressProgress.value)
-                        }
-                        .drawWithContent {
-                            val r = pillHeight.toPx() / 2f
-                            drawRoundRect(
-                                color = colors.accent.copy(
-                                    alpha = if (colors.isDark) 0.24f else 0.15f
-                                ),
-                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r)
-                            )
-                        }
-                )
+                            alpha = 0.75f + 0.25f * (1f - pressProgress.value)
+                        },
+                    shape = pillShape(pillHeight.value),
+                    frostAlpha = 0.45f,
+                    highlightColor = colors.accent,
+                    highlightTint = 0.10f
+                ) {}
             }
 
             // ---------------- Tab 项 ----------------
@@ -278,8 +278,8 @@ fun GlassTabBar(
                     TabItem(
                         item = item,
                         selected = index == selectedIndex,
-                        // iOS 26：选中项显示文字（在栏内、图标下方），其余纯图标
-                        showLabel = !compact && index == selectedIndex,
+                        // iOS 26 效果图：**每个 Tab 都带文字标签**（不再是只选中项显示）
+                        showLabel = !compact,
                         onPressChange = { down -> pressedIndex = if (down) index else -1 },
                         onClick = { onSelect(index) },
                         modifier = Modifier.width(itemWidthDp)
@@ -346,10 +346,13 @@ private fun TabItem(
         )
     }
 
+    // v1.8.8：对齐 iOS 26 效果图 —— 文字/图标都是中性色，
+    // 选中语义完全由液态玻璃浮起胶囊表达（iOS 的 pill 和文字都不染色）。
+    // 旧版选中项图标+文字变 accent 蓝，与 iOS 的玻璃 pill 观感不符。
     val tint = when {
         item.primary -> Color.White
-        selected -> colors.accent
-        else -> colors.text.copy(alpha = 0.70f)
+        selected -> colors.text
+        else -> colors.text.copy(alpha = 0.62f)
     }
 
     Column(
@@ -413,7 +416,7 @@ private fun TabItem(
         Text(
             item.label,
             style = LType.Micro,
-            color = colors.accent,
+            color = tint,
             textAlign = TextAlign.Center,
             maxLines = 1,
             modifier = Modifier.graphicsLayer { alpha = if (showLabel) 1f else 0f }

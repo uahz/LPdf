@@ -1233,7 +1233,7 @@ private fun ReaderTopBar(
         LiquidGlass(
             Modifier.fillMaxWidth().height(56.dp),
             shape = pillShape(56f),
-            frostAlpha = 0.78f
+            frostAlpha = 0.92f
         ) {
             Box(
                 Modifier
@@ -1340,7 +1340,7 @@ private fun ReaderDock(
         LiquidGlass(
             Modifier.fillMaxWidth().height(56.dp),
             shape = pillShape(56f),
-            frostAlpha = 0.78f
+            frostAlpha = 0.92f
         ) {
             Row(
                 Modifier
@@ -1383,7 +1383,7 @@ private fun ReaderDock(
         LiquidGlass(
             Modifier.height(44.dp),
             shape = pillShape(44f),
-            frostAlpha = 0.78f
+            frostAlpha = 0.92f
         ) {
             Row(
                 Modifier

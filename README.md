@@ -1,4 +1,4 @@
-# LPdf 1.8.7 · Android PDF 阅读器
+# LPdf 1.8.8 · Android PDF 阅读器
 
 纯本地优先的 PDF 阅读器，界面采用 iOS 26 液态玻璃（Liquid Glass）风格。
 Kotlin + Jetpack Compose，minSdk 33（Android 13）。
@@ -14,7 +14,7 @@ debug 包**不对外发布** —— 它有 `.debug` 包名后缀、包体大一�
 放出来只会让用户不知道该下哪个。开发排查请用 CI 的 Actions artifacts。
 
 ```bash
-adb install -r dist/LPdf-1.8.7-release.apk
+adb install -r dist/LPdf-1.8.8-release.apk
 ```
 
 签名信息：RSA 4096，有效期至 2056 年，SHA-256 `1590d022df4b05e6b76f268fa096b4ae8a2fc18e5f22eca18eb692aa7f1e2851`。
@@ -36,6 +36,17 @@ release 仍会产出但处于未签名状态（不会构建失败）。要出签
 
 - 复制 `keystore.properties.example` 为 `keystore.properties` 并填入口令，密钥库放在 `keystore/lpdf-release.jks`
 - 或设置环境变量 `LPdf_KEYSTORE_PATH` / `LPdf_KEYSTORE_PASSWORD` / `LPdf_KEY_ALIAS` / `LPdf_KEY_PASSWORD`
+
+## 1.8.8 变更
+
+**主底栏 1:1 液态玻璃悬浮底栏（对齐 iOS 26 效果图）**
+
+- 选中指示器换成**真·液态玻璃浮起胶囊**：复用 LiquidGlass 组件（折射 + 模糊 + 边缘高光 + 微量 accent 顶部染色），弹簧滑动、按压缩放
+- **每个 Tab 都带文字标签**（对齐效果图，不再只有选中项显示）
+- 图标/文字改中性色：选中语义完全由玻璃浮起胶囊表达（iOS 的 pill 和文字都不染色）
+- 阅读页顶栏与 Dock 玻璃加实到 0.92，黑色正文透出残影消除
+- versionCode 188
+
 
 ## 1.8.7 变更
 
