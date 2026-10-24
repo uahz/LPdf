@@ -265,11 +265,15 @@ fun GlassTabBar(
             }
 
             // ---------------- Tab 项 ----------------
-            Row(
-                Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 4.dp, vertical = 4.dp)
-            ) {
+            //
+            // v1.8.7 关键修正：Tab 槽与指示器必须是**同一套算术**。
+            // 旧写法 Row 加 4dp padding、每项再缩 8dp（itemWidth-8dp），
+            // 实际槽中心 = 4 + i×(itemWidth-8) + (itemWidth-8)/2，
+            // 而指示器按 (i+0.5)×itemWidth 定位 —— 每槽差 8dp、逐项累积，
+            // 第 5 项偏差 32dp：真机上「文档」偏左、「我的」整个偏出右边界。
+            // 现在槽宽 = itemWidthDp（占满等分、无额外 padding），
+            // 与指示器公式严格一致。
+            Row(Modifier.fillMaxSize()) {
                 items.forEachIndexed { index, item ->
                     TabItem(
                         item = item,
@@ -278,9 +282,7 @@ fun GlassTabBar(
                         showLabel = !compact && index == selectedIndex,
                         onPressChange = { down -> pressedIndex = if (down) index else -1 },
                         onClick = { onSelect(index) },
-                        modifier = Modifier
-                            .width(itemWidthDp - 8.dp)
-                            .fillMaxSize()
+                        modifier = Modifier.width(itemWidthDp)
                     )
                 }
             }
